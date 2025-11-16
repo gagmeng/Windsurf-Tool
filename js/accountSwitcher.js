@@ -306,42 +306,15 @@ class AccountSwitcher {
   }
   
   /**
-   * 写入数据库
+   * 写入数据库（使用纯 Node.js 实现）
    */
   static async writeToDB(key, value) {
-    const initSqlJs = require('sql.js');
+    const SQLiteHelper = require('./sqliteHelper');
     const dbPath = WindsurfPathDetector.getDBPath();
     
     try {
-      // 备份数据库
-      await this.backupDB();
-      
-      // 读取数据库文件
-      const dbBuffer = await fs.readFile(dbPath);
-      
-      // 初始化 sql.js
-      const SQL = await initSqlJs();
-      const db = new SQL.Database(dbBuffer);
-      
-      try {
-        // 如果 value 是对象，转为 JSON 字符串
-        const finalValue = typeof value === 'object' && !Buffer.isBuffer(value) 
-          ? JSON.stringify(value) 
-          : value;
-        
-        // 执行插入或更新
-        db.run('INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)', [key, finalValue]);
-        
-        // 导出数据库
-        const data = db.export();
-        
-        // 写回文件
-        await fs.writeFile(dbPath, data);
-        
-        console.log(`✅ 已写入数据库: ${key}`);
-      } finally {
-        db.close();
-      }
+      await SQLiteHelper.setValue(dbPath, key, value);
+      console.log(`✅ 已写入数据库: ${key}`);
     } catch (error) {
       console.error(`❌ 写入数据库失败 (${key}):`, error);
       throw error;
@@ -494,33 +467,15 @@ class AccountSwitcher {
   }
   
   /**
-   * 获取当前登录的账号信息
+   * 获取当前登录的账号信息（使用纯 Node.js 实现）
    */
   static async getCurrentAccount() {
-    const initSqlJs = require('sql.js');
+    const SQLiteHelper = require('./sqliteHelper');
     const dbPath = WindsurfPathDetector.getDBPath();
     
     try {
-      // 读取数据库文件
-      const dbBuffer = await fs.readFile(dbPath);
-      
-      // 初始化 sql.js
-      const SQL = await initSqlJs();
-      const db = new SQL.Database(dbBuffer);
-      
-      try {
-        // 查询数据
-        const result = db.exec('SELECT value FROM ItemTable WHERE key = ?', ['windsurfAuthStatus']);
-        
-        if (result.length > 0 && result[0].values.length > 0) {
-          const value = result[0].values[0][0];
-          return JSON.parse(value);
-        }
-        
-        return null;
-      } finally {
-        db.close();
-      }
+      const value = await SQLiteHelper.getValue(dbPath, 'windsurfAuthStatus');
+      return value;
     } catch (error) {
       console.error('获取当前账号失败:', error);
       return null;
