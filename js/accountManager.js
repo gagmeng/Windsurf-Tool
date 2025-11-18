@@ -94,7 +94,7 @@ const AccountManager = {
 
       // 只有有 expiresAt 时才显示到期时间，否则显示 -
       const expiryText = acc.expiresAt && expiry.expiryDate
-        ? expiry.expiryDate.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' })
+        ? expiry.expiryDate.toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' })
         : '-';
 
       const tokenStatusText = tokenStatus.text;
@@ -155,9 +155,13 @@ const AccountManager = {
 
     listEl.innerHTML = html;
     
-    // 初始化Lucide图标
+    // 初始化Lucide图标（延迟执行确保DOM完全渲染）
     if (typeof lucide !== 'undefined') {
-      lucide.createIcons();
+      // 使用 requestAnimationFrame 确保在下一帧渲染
+      requestAnimationFrame(() => {
+        lucide.createIcons();
+        console.log('✅ 图标初始化完成');
+      });
     }
     
     // 绑定右键菜单
@@ -179,6 +183,13 @@ const AccountManager = {
     document.getElementById('activeCount').textContent = activeCount;
     document.getElementById('warningCount').textContent = warningCount;
     document.getElementById('expiredCount').textContent = expiredCount;
+    
+    // 加载完成后，标记当前登录的账号
+    if (typeof updateAccountListWithCurrent === 'function') {
+      setTimeout(() => {
+        updateAccountListWithCurrent();
+      }, 100);
+    }
   },
 
   /**
@@ -774,8 +785,6 @@ const AccountManager = {
           expiresAt: queryResult.expiresAt || null // 保存到期时间
         };
         
-        console.log('准备更新账号信息:', updatedAccount);
-        
         // 调用 IPC 更新账号信息到 JSON 文件
         const updateResult = await window.ipcRenderer.invoke('update-account', updatedAccount);
         
@@ -841,9 +850,11 @@ const AccountManager = {
       if (icon) icon.setAttribute('data-lucide', 'eye');
     }
     
-    // 重新初始化图标
-    if (typeof lucide !== 'undefined') {
-      lucide.createIcons();
+    // 重新初始化图标（只初始化当前按钮的图标）
+    if (typeof lucide !== 'undefined' && icon) {
+      requestAnimationFrame(() => {
+        lucide.createIcons({ icons: { eye: lucide.icons.Eye, 'eye-off': lucide.icons.EyeOff }, nameAttr: 'data-lucide' });
+      });
     }
   },
 
@@ -859,13 +870,12 @@ const AccountManager = {
       return;
     }
     
-    const email = emailEl.textContent.trim();
+    // 先保存原始文本和颜色
+    const originalText = emailEl.textContent.trim();
+    const originalColor = emailEl.style.color;
     
     try {
-      await this.copyToClipboard(email);
-      
-      const originalText = emailEl.textContent;
-      const originalColor = emailEl.style.color;
+      await this.copyToClipboard(originalText);
       
       emailEl.textContent = '✓ 已复制';
       emailEl.style.color = '#34c759';

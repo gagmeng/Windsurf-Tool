@@ -4,6 +4,7 @@ const execAsync = util.promisify(exec);
 
 /**
  * 跨平台浏览器进程关闭工具
+ * 支持 JS 注册（puppeteer-real-browser）
  */
 class BrowserKiller {
   /**
@@ -26,13 +27,9 @@ class BrowserKiller {
    */
   static async forceKillBrowserProcessesWindows() {
     const processes = [
-      'msedge.exe',           // Edge浏览器主进程
-      'msedgedriver.exe',     // Edge驱动
       'chrome.exe',           // Chrome浏览器主进程
       'chromedriver.exe',     // Chrome驱动
-      'chromium.exe',         // Chromium
-      'MicrosoftEdgeCP.exe',  // Edge内容进程
-      'MicrosoftEdgeSH.exe'   // Edge沙盒进程
+      'chromium.exe'          // Chromium
     ];
 
     console.log('[Windows] 开始关闭浏览器进程...');
@@ -155,7 +152,7 @@ class BrowserKiller {
       }
       
       // 强制杀死所有浏览器进程
-      log('正在强制杀死浏览器进程...');
+      log('正在强制终止浏览器进程...');
       await this.forceKillBrowserProcesses();
       
       log('✓ 已取消批量注册，所有浏览器窗口已关闭');

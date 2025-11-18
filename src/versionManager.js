@@ -1,7 +1,8 @@
 const https = require('https');
 const http = require('http');
 const { shell } = require('electron');
-const packageJson = require('../package.json');
+const path = require('path');
+const packageJson = require(path.join(__dirname, '..', 'package.json'));
 const crypto = require('crypto');
 
 class VersionManager {
@@ -15,7 +16,7 @@ class VersionManager {
     });
     
     this.apiUrl = apiUrl || 'https://windsurf-api.crispvibe.cn/version_check.php';
-    this.checkInterval = 3 * 60 * 1000; // 3分钟检查一次
+    this.checkInterval = 24 * 60 * 60 * 1000; // 24小时检查一次（降低频率）
     this.lastCheckTime = 0;
     this.checkCount = 0; // 检测次数
     this.failureCount = 0; // 连续失败次数
@@ -179,7 +180,7 @@ class VersionManager {
         console.error('❌ API 无法访问，触发阻止回调');
         this.onApiUnavailableCallback({
           error: error.message,
-          message: '无法连接到服务器，请检查网络连接后重启软件'
+          message: '无法连接到服务器，请检查网络连接。如果开启了代理/VPN，请关闭后重试。'
         });
       }
       
@@ -392,6 +393,23 @@ class VersionManager {
       console.log(`🔍 检查版本更新... 当前版本: ${this.currentVersion}`);
       
       const versionInfo = await this.getLatestVersion();
+      
+      // 验证服务器返回的版本号格式
+      if (!this.isValidVersion(versionInfo.version)) {
+        console.warn(`⚠️ 服务器返回的版本号格式异常: ${versionInfo.version}`);
+        console.warn(`⚠️ 忽略异常版本号，软件继续正常使用`);
+        
+        // 返回一个安全的默认值，表示当前版本是最新的
+        return {
+          hasUpdate: false,
+          forceUpdate: false,
+          isSupported: true,
+          currentVersion: this.currentVersion,
+          latestVersion: this.currentVersion,
+          updateMessage: '版本检测异常，已跳过更新检查',
+          serverInfo: null
+        };
+      }
       
       // 客户端验证：使用本地版本比较作为双重保护
       const compareResult = this.compareVersions(this.currentVersion, versionInfo.version);

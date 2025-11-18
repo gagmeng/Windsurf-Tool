@@ -8,31 +8,50 @@ const os = require('os');
 
 const execAsync = promisify(exec);
 
+// 日志回调函数（用于向前端发送日志）
+let logCallback = null;
+
 /**
- * 生成新的机器ID（根据 WINDSURF_CONFIG.md 文档）
+ * 设置日志回调
+ */
+function setLogCallback(callback) {
+  logCallback = callback;
+}
+
+/**
+ * 输出日志（同时输出到控制台和回调）
+ */
+function log(message, type = 'info') {
+  console.log(message);
+  if (logCallback) {
+    logCallback({ message, type });
+  }
+}
+
+/**
+ * 生成新的机器ID（统一使用 accountSwitcher 的逻辑）
  */
 function generateMachineIds() {
-  // 1. 主机器ID (machineid 文件) - 标准 UUID 小写
-  const mainMachineId = uuidv4().toLowerCase();
+  const platform = process.platform;
   
-  // 2. 遥测机器ID (telemetry.machineId) - 64位十六进制
-  const telemetryMachineId = crypto.randomBytes(32).toString('hex');
-  
-  // 3. SQM ID (telemetry.sqmId) - UUID 大写带花括号
-  const sqmId = '{' + uuidv4().toUpperCase() + '}';
-  
-  // 4. 开发设备ID (telemetry.devDeviceId) - 标准 UUID 小写
-  const devDeviceId = uuidv4().toLowerCase();
-  
-  // 5. 服务机器ID (storage.serviceMachineId) - 标准 UUID 小写
-  const serviceMachineId = uuidv4().toLowerCase();
-
-  return { 
-    mainMachineId,
-    telemetryMachineId, 
-    sqmId, 
-    devDeviceId,
-    serviceMachineId
+  return {
+    // 1. 主机器ID (machineid 文件) - 标准 UUID 小写
+    mainMachineId: uuidv4().toLowerCase(),
+    
+    // 2. 遥测机器ID (telemetry.machineId) - SHA256 哈希
+    telemetryMachineId: crypto.createHash('sha256').update(crypto.randomBytes(32)).digest('hex'),
+    
+    // 3. macOS 专用机器ID (telemetry.macMachineId) - SHA512 哈希
+    macMachineId: platform === 'darwin' ? crypto.createHash('sha512').update(crypto.randomBytes(64)).digest('hex') : null,
+    
+    // 4. SQM ID (telemetry.sqmId) - UUID 大写带花括号
+    sqmId: '{' + uuidv4().toUpperCase() + '}',
+    
+    // 5. 开发设备ID (telemetry.devDeviceId) - 标准 UUID
+    devDeviceId: uuidv4().toLowerCase(),
+    
+    // 6. 服务机器ID (storage.serviceMachineId) - 标准 UUID
+    serviceMachineId: uuidv4().toLowerCase()
   };
 }
 
@@ -86,14 +105,14 @@ async function detectWindsurfInstallPath() {
     try {
       const exePath = path.join(installPath, 'Windsurf.exe');
       await fs.access(exePath);
-      console.log(`✅ 检测到 Windsurf 安装路径: ${installPath}`);
+      log(`✅ 检测到 Windsurf 安装路径: ${installPath}`, 'success');
       return installPath;
     } catch (err) {
       // 路径不存在，继续检测
     }
   }
 
-  console.log('⚠️ 未能自动检测到 Windsurf 安装路径');
+  log('⚠️ 未能自动检测到 Windsurf 安装路径', 'warning');
   return null;
 }
 
@@ -111,100 +130,32 @@ function getWindsurfPaths() {
 }
 
 /**
- * 检查 Windsurf 是否正在运行
+ * 检查 Windsurf 是否正在运行（使用 accountSwitcher 的逻辑）
  */
 async function checkWindsurfRunning() {
   try {
-    const platform = process.platform;
-    let command;
-
-    if (platform === 'win32') {
-      command = 'tasklist /FI "IMAGENAME eq Windsurf.exe"';
-    } else if (platform === 'darwin') {
-      command = 'pgrep -fi "Windsurf.app/Contents/MacOS/Windsurf" || pgrep -fi "Windsurf Helper" || true';
-    } else {
-      command = 'pgrep -fi "windsurf" || true';
-    }
-
-    const { stdout } = await execAsync(command);
-
-    if (platform === 'win32') {
-      return stdout.includes('Windsurf.exe');
-    } else {
-      return stdout.trim().length > 0;
-    }
+    const { WindsurfPathDetector } = require(path.join(__dirname, '..', 'js', 'accountSwitcher'));
+    return await WindsurfPathDetector.isRunning();
   } catch (error) {
+    log(`检测运行状态失败: ${error.message}`, 'warning');
     return false;
   }
 }
 
 /**
- * 关闭 Windsurf 应用
+ * 关闭 Windsurf 应用（使用 accountSwitcher 的成熟逻辑）
  */
 async function closeWindsurf() {
   try {
-    console.log('🔄 正在关闭 Windsurf 应用...');
+    log('🔄 正在关闭 Windsurf 应用...', 'info');
     
-    const platform = process.platform;
-    let commands = [];
+    const { WindsurfPathDetector } = require(path.join(__dirname, '..', 'js', 'accountSwitcher'));
+    await WindsurfPathDetector.closeWindsurf();
     
-    if (platform === 'win32') {
-      // Windows: 使用 taskkill，忽略"进程不存在"错误
-      commands = ['taskkill /F /T /IM Windsurf.exe 2>nul || exit 0'];
-    } else if (platform === 'darwin') {
-      // macOS: 使用 pkill，忽略"进程不存在"错误
-      commands = [
-        'pkill -9 -f "Windsurf.app/Contents/MacOS/Windsurf" 2>/dev/null || true',
-        'pkill -9 -f "Windsurf Helper (Renderer)" 2>/dev/null || true',
-        'pkill -9 -f "Windsurf Helper (GPU)" 2>/dev/null || true',
-        'pkill -9 -f "Windsurf Helper (Plugin)" 2>/dev/null || true',
-        'pkill -9 -f "Windsurf Helper" 2>/dev/null || true',
-        'killall -9 Windsurf 2>/dev/null || true'
-      ];
-    } else {
-      // Linux: 使用 pkill 和 killall，忽略"进程不存在"错误
-      commands = [
-        'pkill -9 -f "windsurf" 2>/dev/null || true',
-        'killall -9 windsurf 2>/dev/null || true'
-      ];
-    }
-
-    // 执行所有关闭命令，忽略所有错误
-    for (const cmd of commands) {
-      try {
-        await execAsync(cmd);
-      } catch (e) {
-        // 完全忽略错误，因为进程可能本来就不存在
-        console.log(`执行命令: ${cmd} (忽略错误)`);
-      }
-    }
-
-    // 等待进程完全关闭
-    await new Promise(resolve => setTimeout(resolve, 2000));
-
-    // 重试检测（最多5次）
-    const maxRetries = 5;
-    for (let i = 0; i < maxRetries; i++) {
-      const isStillRunning = await checkWindsurfRunning();
-      if (!isStillRunning) {
-        console.log('✅ Windsurf 应用已关闭');
-        return { success: true };
-      }
-      console.log(`等待 Windsurf 关闭... (${i + 1}/${maxRetries})`);
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    }
-
-    // 最后检查一次
-    const isRunning = await checkWindsurfRunning();
-    if (isRunning) {
-      console.log('❌ 无法关闭 Windsurf 应用，请手动关闭后重试');
-      throw new Error('无法关闭 Windsurf 应用，请手动关闭后重试');
-    }
-    
-    console.log('✅ Windsurf 应用已关闭');
+    log('✅ Windsurf 应用已关闭', 'success');
     return { success: true };
   } catch (error) {
-    console.log(`❌ 关闭 Windsurf 失败: ${error.message}`);
+    log(`❌ 关闭 Windsurf 失败: ${error.message}`, 'error');
     return { success: false, error: error.message };
   }
 }
@@ -214,13 +165,13 @@ async function closeWindsurf() {
  */
 async function updateMachineIdFile(machineIdPath, machineId) {
   try {
-    console.log('🔄 正在更新 machineid 文件...');
+    log('🔄 正在更新 machineid 文件...', 'info');
     await fs.mkdir(path.dirname(machineIdPath), { recursive: true });
     await fs.writeFile(machineIdPath, machineId, 'utf-8');
-    console.log(`✅ machineid 文件已更新: ${machineId}`);
+    log(`✅ machineid 文件已更新: ${machineId}`, 'success');
     return { success: true };
   } catch (error) {
-    console.log(`❌ 更新 machineid 文件失败: ${error.message}`);
+    log(`❌ 更新 machineid 文件失败: ${error.message}`, 'error');
     return { success: false, error: error.message };
   }
 }
@@ -230,7 +181,7 @@ async function updateMachineIdFile(machineIdPath, machineId) {
  */
 async function updateStorageJson(storagePath, machineIds) {
   try {
-    console.log('🔄 正在更新 storage.json...');
+    log('🔄 正在更新 storage.json...', 'info');
     
     await fs.mkdir(path.dirname(storagePath), { recursive: true });
     
@@ -238,26 +189,34 @@ async function updateStorageJson(storagePath, machineIds) {
     try {
       const content = await fs.readFile(storagePath, 'utf-8');
       storageData = JSON.parse(content);
-      console.log('✅ 已读取现有 storage.json');
+      log('✅ 已读取现有 storage.json', 'success');
     } catch (err) {
-      console.log('ℹ️ 未找到现有 storage.json，将创建新文件');
+      log('ℹ️ 未找到现有 storage.json，将创建新文件', 'info');
     }
     
-    // 根据文档更新三个 ID
+    // 更新机器 ID 字段
     storageData['telemetry.machineId'] = machineIds.telemetryMachineId;
     storageData['telemetry.sqmId'] = machineIds.sqmId;
     storageData['telemetry.devDeviceId'] = machineIds.devDeviceId;
     
+    // macOS 特有字段
+    if (machineIds.macMachineId) {
+      storageData['telemetry.macMachineId'] = machineIds.macMachineId;
+    }
+    
     await fs.writeFile(storagePath, JSON.stringify(storageData, null, 2));
     
-    console.log('✅ storage.json 已更新');
-    console.log(`  - telemetry.machineId: ${machineIds.telemetryMachineId.substring(0, 16)}...`);
-    console.log(`  - telemetry.sqmId: ${machineIds.sqmId}`);
-    console.log(`  - telemetry.devDeviceId: ${machineIds.devDeviceId}`);
+    log('✅ storage.json 已更新', 'success');
+    log(`  - telemetry.machineId: ${machineIds.telemetryMachineId.substring(0, 16)}...`, 'info');
+    log(`  - telemetry.sqmId: ${machineIds.sqmId}`, 'info');
+    log(`  - telemetry.devDeviceId: ${machineIds.devDeviceId}`, 'info');
+    if (machineIds.macMachineId) {
+      log(`  - telemetry.macMachineId: ${machineIds.macMachineId.substring(0, 16)}...`, 'info');
+    }
     
     return { success: true };
   } catch (error) {
-    console.log(`❌ 更新 storage.json 失败: ${error.message}`);
+    log(`❌ 更新 storage.json 失败: ${error.message}`, 'error');
     return { success: false, error: error.message };
   }
 }
@@ -267,13 +226,13 @@ async function updateStorageJson(storagePath, machineIds) {
  */
 async function updateServiceMachineId(dbPath, serviceMachineId) {
   try {
-    console.log('🔄 正在更新 state.vscdb 中的 serviceMachineId...');
+    log('🔄 正在更新 state.vscdb 中的 serviceMachineId...', 'info');
     
     // 检查数据库文件是否存在
     try {
       await fs.access(dbPath);
     } catch (err) {
-      console.log('ℹ️ 数据库文件不存在，跳过更新 serviceMachineId');
+      log('ℹ️ 数据库文件不存在，跳过更新 serviceMachineId', 'info');
       return { success: true };
     }
     
@@ -298,14 +257,14 @@ async function updateServiceMachineId(dbPath, serviceMachineId) {
       // 写回文件
       await fs.writeFile(dbPath, data);
       
-      console.log(`✅ serviceMachineId 已更新: ${serviceMachineId}`);
+      log(`✅ serviceMachineId 已更新: ${serviceMachineId}`, 'success');
       
       return { success: true };
     } finally {
       db.close();
     }
   } catch (error) {
-    console.log(`❌ 更新 serviceMachineId 失败: ${error.message}`);
+    log(`❌ 更新 serviceMachineId 失败: ${error.message}`, 'error');
     return { success: false, error: error.message };
   }
 }
@@ -315,7 +274,7 @@ async function updateServiceMachineId(dbPath, serviceMachineId) {
  */
 async function clearWindsurfCache() {
   try {
-    console.log('🔄 正在清除 Windsurf 缓存目录...');
+    log('🔄 正在清除 Windsurf 缓存目录...', 'info');
     
     const userDataPath = getWindsurfUserDataPath();
     const cacheDirectories = [
@@ -327,20 +286,22 @@ async function clearWindsurfCache() {
       path.join(userDataPath, 'GPUCache')
     ];
     
+    let clearedCount = 0;
     for (const dir of cacheDirectories) {
       try {
         await fs.access(dir);
         await fs.rm(dir, { recursive: true, force: true });
-        console.log(`✅ 已清除: ${path.basename(dir)}`);
+        log(`✅ 已清除: ${path.basename(dir)}`, 'success');
+        clearedCount++;
       } catch (err) {
         // 目录不存在，跳过
       }
     }
     
-    console.log('✅ Windsurf 缓存目录清除完成');
+    log(`✅ Windsurf 缓存目录清除完成 (清除了 ${clearedCount} 个目录)`, 'success');
     return { success: true };
   } catch (error) {
-    console.log(`⚠️ 清除 Windsurf 缓存失败（可忽略）: ${error.message}`);
+    log(`⚠️ 清除 Windsurf 缓存失败（可忽略）: ${error.message}`, 'warning');
     return { success: true };
   }
 }
@@ -350,7 +311,7 @@ async function clearWindsurfCache() {
  */
 async function resetMacIdentifiers() {
   try {
-    console.log('🔄 正在重置 macOS Windsurf 系统标识符...');
+    log('🔄 正在重置 macOS Windsurf 系统标识符...', 'info');
     
     const homeDir = os.homedir();
     const cacheDirectories = [
@@ -358,20 +319,22 @@ async function resetMacIdentifiers() {
       path.join(homeDir, 'Library/Saved Application State/com.windsurf.savedState')
     ];
     
+    let deletedCount = 0;
     for (const dir of cacheDirectories) {
       try {
         await fs.access(dir);
         await fs.rm(dir, { recursive: true, force: true });
-        console.log(`✅ 已删除缓存目录: ${dir}`);
+        log(`✅ 已删除缓存目录: ${path.basename(dir)}`, 'success');
+        deletedCount++;
       } catch (err) {
-        console.log(`ℹ️ 跳过不存在的目录: ${dir}`);
+        log(`ℹ️ 跳过不存在的目录: ${path.basename(dir)}`, 'info');
       }
     }
     
-    console.log('✅ macOS Windsurf 系统标识符已重置');
+    log(`✅ macOS Windsurf 系统标识符已重置 (删除了 ${deletedCount} 个目录)`, 'success');
     return { success: true };
   } catch (error) {
-    console.log(`❌ 重置 macOS Windsurf 标识符失败: ${error.message}`);
+    log(`❌ 重置 macOS Windsurf 标识符失败: ${error.message}`, 'error');
     return { success: false, error: error.message };
   }
 }
@@ -381,22 +344,22 @@ async function resetMacIdentifiers() {
  */
 async function fullResetWindsurf(customInstallPath = null) {
   try {
-    console.log('');
-    console.log('='.repeat(60));
-    console.log('🔄 开始重置 Windsurf 机器ID');
-    console.log('='.repeat(60));
-    console.log('');
+    log('', 'info');
+    log('='.repeat(60), 'info');
+    log('🔄 开始重置 Windsurf 机器ID', 'info');
+    log('='.repeat(60), 'info');
+    log('', 'info');
     
     // Windows 系统检测安装路径
     if (process.platform === 'win32' && !customInstallPath) {
-      console.log('📋 步骤 0: 检测 Windsurf 安装路径');
+      log('📋 步骤 0: 检测 Windsurf 安装路径', 'info');
       const detectedPath = await detectWindsurfInstallPath();
       if (detectedPath) {
-        console.log(`✅ 已检测到安装路径: ${detectedPath}`);
+        log(`✅ 已检测到安装路径: ${detectedPath}`, 'success');
       } else {
-        console.log('⚠️ 未检测到安装路径，将使用默认配置路径');
+        log('⚠️ 未检测到安装路径，将使用默认配置路径', 'warning');
       }
-      console.log('');
+      log('', 'info');
     }
     
     // 检查并关闭应用
@@ -407,21 +370,24 @@ async function fullResetWindsurf(customInstallPath = null) {
         throw new Error(closeResult.error);
       }
     } else {
-      console.log('ℹ️ Windsurf 未运行，无需关闭');
+      log('ℹ️ Windsurf 未运行，无需关闭', 'info');
     }
     
-    console.log('');
-    console.log('📋 步骤 1: 生成新的机器ID');
+    log('', 'info');
+    log('📋 步骤 1: 生成新的机器ID', 'info');
     const machineIds = generateMachineIds();
-    console.log('✅ 已生成新的机器ID');
-    console.log(`  - 主机器ID: ${machineIds.mainMachineId}`);
-    console.log(`  - 遥测ID: ${machineIds.telemetryMachineId.substring(0, 16)}...`);
-    console.log(`  - SQM ID: ${machineIds.sqmId}`);
-    console.log(`  - 开发设备ID: ${machineIds.devDeviceId}`);
-    console.log(`  - 服务ID: ${machineIds.serviceMachineId}`);
+    log('✅ 已生成新的机器ID', 'success');
+    log(`  - 主机器ID: ${machineIds.mainMachineId}`, 'info');
+    log(`  - 遥测ID: ${machineIds.telemetryMachineId.substring(0, 16)}...`, 'info');
+    log(`  - SQM ID: ${machineIds.sqmId}`, 'info');
+    log(`  - 开发设备ID: ${machineIds.devDeviceId}`, 'info');
+    log(`  - 服务ID: ${machineIds.serviceMachineId}`, 'info');
+    if (machineIds.macMachineId) {
+      log(`  - macOS机器ID: ${machineIds.macMachineId.substring(0, 16)}...`, 'info');
+    }
     
-    console.log('');
-    console.log('📋 步骤 2: 更新配置文件');
+    log('', 'info');
+    log('📋 步骤 2: 更新配置文件', 'info');
     const paths = getWindsurfPaths();
     
     // 2.1 更新 machineid 文件
@@ -439,28 +405,28 @@ async function fullResetWindsurf(customInstallPath = null) {
     // 2.3 更新 SQLite 数据库
     const dbResult = await updateServiceMachineId(paths.stateDb, machineIds.serviceMachineId);
     if (!dbResult.success) {
-      console.log('⚠️ 更新数据库失败，但继续执行');
+      log('⚠️ 更新数据库失败，但继续执行', 'warning');
     }
     
-    console.log('');
-    console.log('📋 步骤 3: 清除 Windsurf 缓存目录');
+    log('', 'info');
+    log('📋 步骤 3: 清除 Windsurf 缓存目录', 'info');
     await clearWindsurfCache();
     
-    console.log('');
-    console.log('📋 步骤 4: 平台特定处理');
+    log('', 'info');
+    log('📋 步骤 4: 平台特定处理', 'info');
     const platform = process.platform;
     if (platform === 'darwin') {
       await resetMacIdentifiers();
     } else {
-      console.log('ℹ️ 非 macOS 平台，跳过平台特定处理');
+      log('ℹ️ 非 macOS 平台，跳过平台特定处理', 'info');
     }
     
-    console.log('');
-    console.log('='.repeat(60));
-    console.log('✅ Windsurf 机器ID重置成功！');
-    console.log('='.repeat(60));
-    console.log('');
-    console.log('💡 提示: 请重新启动 Windsurf 应用以使更改生效');
+    log('', 'info');
+    log('='.repeat(60), 'success');
+    log('✅ Windsurf 机器ID重置成功！', 'success');
+    log('='.repeat(60), 'success');
+    log('', 'info');
+    log('💡 提示: 请重新启动 Windsurf 应用以使更改生效', 'warning');
     
     return {
       success: true,
@@ -468,10 +434,10 @@ async function fullResetWindsurf(customInstallPath = null) {
       machineIds: machineIds
     };
   } catch (error) {
-    console.log('');
-    console.log('='.repeat(60));
-    console.log(`❌ Windsurf 机器ID重置失败: ${error.message}`);
-    console.log('='.repeat(60));
+    log('', 'info');
+    log('='.repeat(60), 'error');
+    log(`❌ Windsurf 机器ID重置失败: ${error.message}`, 'error');
+    log('='.repeat(60), 'error');
     
     return {
       success: false,
@@ -482,6 +448,7 @@ async function fullResetWindsurf(customInstallPath = null) {
 
 module.exports = {
   fullResetWindsurf,
+  setLogCallback,
   getWindsurfUserDataPath,
   getWindsurfPaths,
   checkWindsurfRunning,

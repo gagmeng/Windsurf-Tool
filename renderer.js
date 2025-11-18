@@ -420,10 +420,10 @@ function openSponsorPage() {
  * 启动赞助弹窗定时器
  */
 function startSponsorPopupTimer() {
-  // 首次启动时立即显示
+  // 首次启动时延迟显示
   setTimeout(() => {
     showSponsorPopup();
-  }, 5000); // 5秒后首次弹出
+  }, 5 * 60 * 1000); // 5分钟后首次弹出
   
   // 之后每10分钟弹一次
   sponsorPopupTimer = setInterval(() => {
@@ -464,8 +464,21 @@ window.addEventListener('unhandledrejection', (event) => {
 
 // 监听版本更新通知
 window.ipcRenderer.on('version-update-available', (event, updateInfo) => {
-  console.log('收到版本更新通知:', updateInfo);
-  showVersionUpdateModal(updateInfo);
+  console.log('📢 收到版本更新通知:', updateInfo);
+  
+  // 验证更新信息的完整性
+  if (!updateInfo || !updateInfo.currentVersion || !updateInfo.latestVersion) {
+    console.error('❌ 版本更新通知数据不完整:', updateInfo);
+    return;
+  }
+  
+  // 只有确实需要更新时才显示弹窗
+  if (updateInfo.hasUpdate) {
+    console.log(`✅ 显示版本更新弹窗: ${updateInfo.currentVersion} -> ${updateInfo.latestVersion}`);
+    showVersionUpdateModal(updateInfo);
+  } else {
+    console.log('ℹ️ 收到更新通知但无需更新，忽略');
+  }
 });
 
 // 监听维护模式通知
@@ -544,16 +557,29 @@ function showApiUnavailableModal(errorInfo) {
         <p style="color: #86868b; margin: 0 0 24px 0; line-height: 1.6;">
           ${errorInfo.message || '无法连接到服务器，请检查网络连接后重启软件'}
         </p>
-        <div style="background: #fff3e0; border: 1px solid #ff9800; border-radius: 8px; padding: 16px; margin-bottom: 24px; display: flex; align-items: center; gap: 12px;">
+        <div style="background: #fff3e0; border: 1px solid #ff9800; border-radius: 8px; padding: 16px; margin-bottom: 16px; display: flex; align-items: center; gap: 12px;">
           <i data-lucide="alert-triangle" style="width: 20px; height: 20px; color: #ff9800; flex-shrink: 0;"></i>
           <p style="margin: 0; color: #e65100; font-size: 14px; text-align: left;">
             软件需要连接到服务器才能使用<br>
             请检查您的网络连接后重新启动软件
           </p>
         </div>
-        <button onclick="quitApplication()" style="background: linear-gradient(180deg, #ff3b30 0%, #d32f2f 100%); color: white; border: none; padding: 12px 32px; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; box-shadow: 0 2px 8px rgba(255, 59, 48, 0.3); transition: all 0.2s;" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 4px 12px rgba(255, 59, 48, 0.4)'" onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 2px 8px rgba(255, 59, 48, 0.3)'">
-          退出软件
-        </button>
+        <div style="background: #e3f2fd; border: 1px solid #2196f3; border-radius: 8px; padding: 16px; margin-bottom: 24px; display: flex; align-items: center; gap: 12px;">
+          <i data-lucide="shield" style="width: 20px; height: 20px; color: #1976d2; flex-shrink: 0;"></i>
+          <p style="margin: 0; color: #0d47a1; font-size: 14px; text-align: left;">
+            <strong>如果您开启了代理/VPN（魔法）：</strong><br>
+            请关闭代理后重试，或将软件添加到代理白名单
+          </p>
+        </div>
+        <div style="display: flex; gap: 12px; justify-content: center;">
+          <button id="retryConnectionBtn" onclick="retryConnection()" style="background: linear-gradient(180deg, #34c759 0%, #28a745 100%); color: white; border: none; padding: 12px 32px; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; box-shadow: 0 2px 8px rgba(52, 199, 89, 0.3); transition: all 0.2s; display: flex; align-items: center; gap: 8px;" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 4px 12px rgba(52, 199, 89, 0.4)'" onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 2px 8px rgba(52, 199, 89, 0.3)'">
+            <i data-lucide="refresh-cw" style="width: 16px; height: 16px;"></i>
+            <span>重试连接</span>
+          </button>
+          <button onclick="quitApplication()" style="background: linear-gradient(180deg, #ff3b30 0%, #d32f2f 100%); color: white; border: none; padding: 12px 32px; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; box-shadow: 0 2px 8px rgba(255, 59, 48, 0.3); transition: all 0.2s;" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 4px 12px rgba(255, 59, 48, 0.4)'" onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 2px 8px rgba(255, 59, 48, 0.3)'">
+            退出软件
+          </button>
+        </div>
       </div>
     </div>
   `;
@@ -572,6 +598,87 @@ function showApiUnavailableModal(errorInfo) {
   // 设置强制更新状态
   isForceUpdateActive = true;
   setupForceUpdateProtection();
+}
+
+// 重试连接到服务器
+async function retryConnection() {
+  const retryBtn = document.getElementById('retryConnectionBtn');
+  const modal = document.getElementById('apiUnavailableModal');
+  
+  if (!retryBtn) return;
+  
+  // 禁用按钮并显示加载状态
+  retryBtn.disabled = true;
+  retryBtn.style.opacity = '0.6';
+  retryBtn.style.cursor = 'not-allowed';
+  retryBtn.innerHTML = '<i data-lucide="loader" style="width: 16px; height: 16px; animation: spin 1s linear infinite;"></i><span>正在重试...</span>';
+  
+  // 添加旋转动画
+  const style = document.createElement('style');
+  style.textContent = '@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }';
+  document.head.appendChild(style);
+  
+  // 初始化图标
+  if (typeof lucide !== 'undefined') {
+    lucide.createIcons();
+  }
+  
+  try {
+    console.log('🔄 用户手动重试连接到服务器...');
+    
+    // 调用版本检查来测试连接
+    const result = await window.ipcRenderer.invoke('check-for-updates');
+    
+    if (result.success) {
+      console.log('✅ 重试成功，服务器连接正常');
+      
+      // 显示成功提示
+      retryBtn.innerHTML = '<i data-lucide="check" style="width: 16px; height: 16px;"></i><span>连接成功！</span>';
+      retryBtn.style.background = 'linear-gradient(180deg, #34c759 0%, #28a745 100%)';
+      
+      if (typeof lucide !== 'undefined') {
+        lucide.createIcons();
+      }
+      
+      // 延迟后关闭弹窗并恢复应用
+      setTimeout(() => {
+        if (modal) {
+          modal.remove();
+        }
+        
+        // 恢复页面交互
+        document.body.style.pointerEvents = 'auto';
+        isForceUpdateActive = false;
+        
+        // 刷新页面数据
+        if (typeof refreshAllData === 'function') {
+          refreshAllData();
+        }
+        
+        alert('✅ 服务器连接已恢复！');
+      }, 1000);
+      
+    } else {
+      throw new Error(result.error || '连接失败');
+    }
+    
+  } catch (error) {
+    console.error('❌ 重试连接失败:', error);
+    
+    // 恢复按钮状态
+    retryBtn.disabled = false;
+    retryBtn.style.opacity = '1';
+    retryBtn.style.cursor = 'pointer';
+    retryBtn.innerHTML = '<i data-lucide="refresh-cw" style="width: 16px; height: 16px;"></i><span>重试连接</span>';
+    retryBtn.style.background = 'linear-gradient(180deg, #34c759 0%, #28a745 100%)';
+    
+    if (typeof lucide !== 'undefined') {
+      lucide.createIcons();
+    }
+    
+    // 显示错误提示
+    alert('❌ 连接失败，请检查网络后再试\n\n错误信息: ' + error.message);
+  }
 }
 
 // 带维护模式检测的IPC调用包装器
@@ -686,9 +793,19 @@ async function checkForUpdates() {
   lastVersionCheckTime = now;
   
   try {
+    console.log('🔍 手动检查版本更新...');
     const result = await safeIpcInvoke('check-for-updates');
     
     if (result.success) {
+      // 验证返回的数据完整性
+      if (!result.currentVersion || !result.latestVersion) {
+        console.error('❌ 版本检测返回数据不完整:', result);
+        alert('版本检测失败：服务器返回数据异常');
+        return;
+      }
+      
+      console.log(`✅ 版本检测完成 - 当前: ${result.currentVersion}, 最新: ${result.latestVersion}`);
+      
       if (result.hasUpdate) {
         showVersionUpdateModal(result);
       } else {
@@ -697,10 +814,11 @@ async function checkForUpdates() {
         }
       }
     } else {
-      alert('检查版本更新失败: ' + result.error);
+      console.error('❌ 版本检测失败:', result.error);
+      alert('检查版本更新失败: ' + (result.error || '未知错误'));
     }
   } catch (error) {
-    console.error('检查版本更新失败:', error);
+    console.error('❌ 检查版本更新异常:', error);
     alert('检查版本更新失败: ' + error.message);
   }
 }
@@ -826,6 +944,31 @@ window.addEventListener('DOMContentLoaded', () => {
 
 // 显示版本更新弹窗
 function showVersionUpdateModal(versionInfo) {
+  // 验证版本信息的完整性
+  if (!versionInfo) {
+    console.error('❌ 版本信息为空，无法显示更新弹窗');
+    return;
+  }
+  
+  if (!versionInfo.currentVersion || !versionInfo.latestVersion) {
+    console.error('❌ 版本信息不完整，无法显示更新弹窗:', versionInfo);
+    return;
+  }
+  
+  // 验证版本号格式（防止异常版本号如 999.0.0）
+  const versionPattern = /^(\d+)\.(\d+)\.(\d+)$/;
+  if (!versionPattern.test(versionInfo.latestVersion)) {
+    console.error('❌ 最新版本号格式异常:', versionInfo.latestVersion);
+    return;
+  }
+  
+  // 检查版本号是否合理（每部分不超过100）
+  const versionParts = versionInfo.latestVersion.split('.').map(Number);
+  if (versionParts.some(part => part > 100)) {
+    console.error('❌ 版本号数值异常:', versionInfo.latestVersion);
+    return;
+  }
+  
   versionUpdateInfo = versionInfo;
   
   const modal = document.getElementById('versionUpdateModal');
@@ -839,7 +982,7 @@ function showVersionUpdateModal(versionInfo) {
   
   if (!modal) return;
   
-  console.log('显示版本更新弹窗:', versionInfo);
+  console.log('✅ 显示版本更新弹窗:', versionInfo);
   
   // 设置标题
   if (versionInfo.forceUpdate) {
@@ -882,29 +1025,44 @@ function showVersionUpdateModal(versionInfo) {
   // 设置下载按钮文本和关闭按钮显示
   if (versionInfo.forceUpdate) {
     downloadBtn.innerHTML = '<i data-lucide="alert-triangle" style="width: 16px; height: 16px; margin-right: 8px;"></i>立即更新（必需）';
-    // 强制更新时隐藏关闭按钮
-    if (closeBtn) closeBtn.style.display = 'none';
+    // 强制更新时，将关闭按钮改为退出程序按钮
+    if (closeBtn) {
+      closeBtn.style.display = 'inline-block';
+      closeBtn.textContent = '退出程序';
+      closeBtn.onclick = quitApplication;
+      closeBtn.className = 'btn btn-secondary';
+    }
   } else {
     downloadBtn.innerHTML = '<i data-lucide="download" style="width: 16px; height: 16px; margin-right: 8px;"></i>立即下载最新版本';
     // 非强制更新时，检查是否支持当前版本（维护模式）
     if (versionInfo.isSupported === false) {
-      // 维护模式：当前版本不再支持，即使非强制更新也不能关闭
-      if (closeBtn) closeBtn.style.display = 'none';
+      // 维护模式：当前版本不再支持，显示退出程序按钮
+      if (closeBtn) {
+        closeBtn.style.display = 'inline-block';
+        closeBtn.textContent = '退出程序';
+        closeBtn.onclick = quitApplication;
+        closeBtn.className = 'btn btn-secondary';
+      }
     } else {
-      // 正常非强制更新：显示关闭按钮
-      if (closeBtn) closeBtn.style.display = 'inline-block';
+      // 正常非强制更新：显示稍后更新按钮
+      if (closeBtn) {
+        closeBtn.style.display = 'inline-block';
+        closeBtn.textContent = '稍后更新';
+        closeBtn.onclick = closeVersionUpdateModal;
+        closeBtn.className = 'btn btn-secondary';
+      }
     }
   }
   
   // 设置提示信息
   if (versionInfo.forceUpdate) {
-    notice.innerHTML = '<i data-lucide="alert-triangle" style="width: 16px; height: 16px; margin-right: 8px; vertical-align: middle;"></i>当前版本已停止支持，必须更新才能继续使用';
+    notice.innerHTML = '<i data-lucide="alert-triangle" style="width: 16px; height: 16px; margin-right: 8px; vertical-align: middle;"></i>当前版本已停止支持，请立即更新或退出程序';
     notice.parentElement.style.background = '#ffebee';
     notice.parentElement.style.borderColor = '#f44336';
     notice.style.color = '#d32f2f';
   } else if (versionInfo.isSupported === false) {
     // 维护模式：非强制更新但版本不再支持
-    notice.innerHTML = '<i data-lucide="alert-triangle" style="width: 16px; height: 16px; margin-right: 8px; vertical-align: middle;"></i>当前版本已进入维护模式，强烈建议立即更新';
+    notice.innerHTML = '<i data-lucide="alert-triangle" style="width: 16px; height: 16px; margin-right: 8px; vertical-align: middle;"></i>当前版本已进入维护模式，请立即更新或退出程序';
     notice.parentElement.style.background = '#fff3e0';
     notice.parentElement.style.borderColor = '#ff9800';
     notice.style.color = '#e65100';
@@ -1413,16 +1571,27 @@ async function checkForUpdatesOnRefresh() {
     
     const result = await window.ipcRenderer.invoke('check-for-updates');
     
-    if (result.success && result.hasUpdate) {
-      console.log('🆕 检测到版本更新:', result.latestVersion);
+    if (result.success) {
+      // 验证返回的数据完整性
+      if (!result.currentVersion || !result.latestVersion) {
+        console.error('❌ 版本检测返回数据不完整:', result);
+        return; // 静默失败
+      }
       
-      // 直接显示更新弹窗，不显示"已是最新版本"的提示
-      showVersionUpdateModal(result);
+      if (result.hasUpdate) {
+        console.log(`🆕 检测到版本更新: ${result.currentVersion} -> ${result.latestVersion}`);
+        
+        // 直接显示更新弹窗，不显示"已是最新版本"的提示
+        showVersionUpdateModal(result);
+      } else {
+        console.log(`✅ 当前版本 ${result.currentVersion} 已是最新版本`);
+      }
     } else {
-      console.log('✅ 当前版本已是最新版本');
+      console.warn('⚠️ 版本检测失败:', result.error);
+      // 静默失败，不显示错误提示
     }
   } catch (error) {
-    console.error('页面刷新版本检测失败:', error);
+    console.error('❌ 页面刷新版本检测异常:', error);
     // 静默失败，不显示错误提示
   }
 }
@@ -1430,7 +1599,8 @@ async function checkForUpdatesOnRefresh() {
 
 let currentConfig = {
   emailDomains: ['example.com'],
-  emailConfig: null
+  emailConfig: null,
+  passwordMode: 'email'  // 默认使用邮箱作为密码
 };
 
 // 切换账号UI的状态
@@ -3279,17 +3449,9 @@ async function clearWindsurf() {
 
 // 仅负责根据 currentConfig 渲染设置界面，不重新从存储加载配置
 function renderSettingsFromCurrentConfig() {
-  // 加载域名列表
-  const domainListEl = document.getElementById('domainList');
-  if (domainListEl) {
-    const domains = Array.isArray(currentConfig.emailDomains) ? currentConfig.emailDomains : [];
-    domainListEl.innerHTML = domains.map(domain => `
-      <div class="domain-tag">
-        ${domain}
-        <button onclick="removeDomain('${domain}')">×</button>
-      </div>
-    `).join('');
-  }
+  // 域名列表由 DomainManager 管理，不在这里渲染
+  // DomainManager.init() 会在切换到设置页面时自动调用
+  console.log('📝 渲染设置界面（域名由 DomainManager 管理）');
   
   // 加载IMAP配置
   const imapHost = document.getElementById('imapHost');
@@ -3321,6 +3483,7 @@ function renderSettingsFromCurrentConfig() {
   const passwordMode = document.getElementById('passwordMode');
   if (passwordMode) {
     passwordMode.value = currentConfig.passwordMode || 'email';
+    console.log('📥 密码模式已加载:', passwordMode.value);
   }
   
   // 加载查询间隔配置
@@ -3357,7 +3520,8 @@ function loadSettings() {
       // 使用默认配置
       currentConfig = {
         emailDomains: ['example.com'],
-        emailConfig: null
+        emailConfig: null,
+        passwordMode: 'email'
       };
     }
   } else {
@@ -3630,87 +3794,114 @@ async function testImap() {
 }
 
 async function saveSettings() {
-  // 从当前界面上的域名标签收集 emailDomains
-  // 批量添加仍然通过“添加域名”按钮处理 textarea 内容
+  console.log('💾 开始保存设置...');
+  
   try {
-    const domainTags = document.querySelectorAll('#domainList .domain-tag');
-    if (domainTags && domainTags.length > 0) {
-      currentConfig.emailDomains = Array.from(domainTags)
-        .map(tag => {
-          const text = tag.textContent || '';
-          // 去掉右侧删除按钮的“×”字符
-          return text.replace('×', '').trim();
-        })
-        .filter(d => d.length > 0);
-    } else {
-      currentConfig.emailDomains = [];
+    // 从当前界面上的域名标签收集 emailDomains
+    // 使用 DomainManager 中的域名列表
+    try {
+      // 优先使用 DomainManager 中的域名列表
+      if (window.DomainManager && window.DomainManager.domains) {
+        currentConfig.emailDomains = [...window.DomainManager.domains];
+        console.log('📋 从 DomainManager 获取域名:', currentConfig.emailDomains);
+      } else {
+        // 备用方案：从 DOM 中读取
+        const domainTags = document.querySelectorAll('#domainTags .domain-tag');
+        if (domainTags && domainTags.length > 0) {
+          currentConfig.emailDomains = Array.from(domainTags)
+            .map(tag => {
+              const span = tag.querySelector('span');
+              return span ? span.textContent.trim() : '';
+            })
+            .filter(d => d.length > 0);
+          console.log('📋 从 DOM 获取域名:', currentConfig.emailDomains);
+        } else {
+          currentConfig.emailDomains = [];
+          console.log('⚠️ 未找到域名');
+        }
+      }
+    } catch (e) {
+      console.warn('从界面收集域名列表失败，将使用内存中的 emailDomains:', e);
     }
-  } catch (e) {
-    console.warn('从界面收集域名列表失败，将使用内存中的 emailDomains:', e);
-  }
 
-  // QQ 邮箱固定配置
-  currentConfig.emailConfig = {
-    host: 'imap.qq.com',
-    port: 993,
-    user: document.getElementById('imapUser').value,
-    password: document.getElementById('imapPassword').value
-  };
-  
-  // 保存密码配置
-  const passwordMode = document.getElementById('passwordMode');
-  if (passwordMode) {
-    currentConfig.passwordMode = passwordMode.value;
-  }
-  
-  // 保存查询间隔配置
-  const queryInterval = document.getElementById('queryInterval');
-  if (queryInterval) {
-    let interval = parseInt(queryInterval.value);
-    // 验证范围：最低1分钟，最高1440分钟（24小时）
-    if (isNaN(interval) || interval < 1) {
-      interval = 1;
-      queryInterval.value = 1;
-    } else if (interval > 1440) {
-      interval = 1440;
-      queryInterval.value = 1440;
-    }
-    currentConfig.queryInterval = interval;
+    // QQ 邮箱固定配置
+    const imapUser = document.getElementById('imapUser');
+    const imapPassword = document.getElementById('imapPassword');
+    currentConfig.emailConfig = {
+      host: 'imap.qq.com',
+      port: 993,
+      user: imapUser ? imapUser.value : '',
+      password: imapPassword ? imapPassword.value : ''
+    };
     
-    // 重启自动查询
-    if (typeof window.restartAutoQuery === 'function') {
-      window.restartAutoQuery(interval);
+    // 保存密码配置
+    const passwordMode = document.getElementById('passwordMode');
+    if (passwordMode) {
+      currentConfig.passwordMode = passwordMode.value;
+      console.log('💾 密码模式已保存:', currentConfig.passwordMode);
     }
-  }
-  
-  // 保存到本地存储
-  localStorage.setItem('windsurfConfig', JSON.stringify(currentConfig));
-  
-  // 通过IPC保存配置到文件
-  try {
-    const result = await window.ipcRenderer.invoke('save-windsurf-config', currentConfig);
-    if (!result.success) {
-      console.warn('保存配置到文件失败:', result.error);
+    
+    // 保存查询间隔配置
+    const queryInterval = document.getElementById('queryInterval');
+    if (queryInterval) {
+      let interval = parseInt(queryInterval.value);
+      // 验证范围：最低5分钟，最高1440分钟（24小时）
+      if (isNaN(interval) || interval < 5) {
+        interval = 5;
+        queryInterval.value = 5;
+      } else if (interval > 1440) {
+        interval = 1440;
+        queryInterval.value = 1440;
+      }
+      currentConfig.queryInterval = interval;
+      
+      // 重启自动查询
+      if (typeof window.restartAutoQuery === 'function') {
+        window.restartAutoQuery(interval);
+      }
     }
+    
+    // 保存到本地存储
+    localStorage.setItem('windsurfConfig', JSON.stringify(currentConfig));
+    console.log('✅ 配置已保存到 localStorage');
+    
+    // 通过IPC保存配置到文件
+    try {
+      const result = await window.ipcRenderer.invoke('save-windsurf-config', currentConfig);
+      if (result.success) {
+        console.log('✅ 配置已保存到文件');
+      } else {
+        console.warn('⚠️ 保存配置到文件失败:', result.error);
+      }
+    } catch (error) {
+      console.warn('⚠️ 调用IPC保存配置失败:', error);
+    }
+    
+    // 显示成功弹窗
+    showCenterMessage('配置已保存成功！', 'success', 2000);
+    
+    // 延迟隐藏悬浮保存按钮（让用户看到保存成功的反馈）
+    const saveBtn = document.querySelector('.save-btn');
+    if (saveBtn) {
+      setTimeout(() => {
+        saveBtn.style.display = 'none';
+      }, 2000);
+    }
+    
+    console.log('✅ 保存设置完成');
+    
   } catch (error) {
-    console.warn('调用IPC保存配置失败:', error);
+    console.error('❌ 保存设置失败:', error);
+    
+    // 显示错误弹窗
+    showCenterMessage(`❌ 保存失败: ${error.message}`, 'error', 5000);
+    
+    // 保持按钮可见，让用户可以重试
+    const saveBtn = document.querySelector('.save-btn');
+    if (saveBtn) {
+      saveBtn.style.display = 'flex';
+    }
   }
-  
-  document.getElementById('settingsStatus').innerHTML = `
-    <div class="status-message status-success">
-      配置已保存！
-    </div>
-  `;
-  
-  // 隐藏悬浮保存按钮
-  const saveBtn = document.querySelector('.save-btn');
-  if (saveBtn) {
-    saveBtn.style.display = 'none';
-  }
-  
-  setTimeout(() => {
-    document.getElementById('settingsStatus').innerHTML = '';
-  }, 3000);
 }
 
 // 监听设置页面的输入变化，显示悬浮保存按钮
@@ -3751,27 +3942,36 @@ async function getCurrentAccount() {
     const currentAccountInfo = document.getElementById('currentAccountInfo');
     const currentAccountEmail = document.getElementById('currentAccountEmail');
     
-    if (result.success && result.email) {
+    // 始终显示当前登录区域
+    if (currentAccountInfo) {
+      currentAccountInfo.style.display = 'block';
+    }
+    
+    if (result && result.success && result.email) {
+      // 有登录信息
       if (currentAccountEmail) {
         currentAccountEmail.textContent = result.email;
-      }
-      if (currentAccountInfo) {
-        currentAccountInfo.style.display = 'block';
+        currentAccountEmail.style.color = '#1d1d1f';
       }
     } else {
+      // 没有登录信息
       if (currentAccountEmail) {
         currentAccountEmail.textContent = '未登录';
-      }
-      // 如果没有登录信息，隐藏整个区域
-      if (currentAccountInfo) {
-        currentAccountInfo.style.display = 'none';
+        currentAccountEmail.style.color = '#86868b';
       }
     }
   } catch (error) {
     console.error('获取当前登录账号失败:', error);
+    const currentAccountInfo = document.getElementById('currentAccountInfo');
     const currentAccountEmail = document.getElementById('currentAccountEmail');
+    
+    // 显示错误状态
+    if (currentAccountInfo) {
+      currentAccountInfo.style.display = 'block';
+    }
     if (currentAccountEmail) {
       currentAccountEmail.textContent = '获取失败';
+      currentAccountEmail.style.color = '#ff3b30';
     }
   }
 }
@@ -4018,6 +4218,173 @@ document.addEventListener('click', (e) => {
   if (target && target.href) {
     e.preventDefault();
     shell.openExternal(target.href);
+  }
+});
+
+// ==================== 批量获取所有Token ====================
+
+/**
+ * 批量获取所有账号Token
+ */
+async function batchGetAllTokens() {
+  try {
+    // 禁用按钮
+    const btn = document.getElementById('batchGetAllTokensBtn');
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<i data-lucide="loader" style="width: 16px; height: 16px; animation: spin 1s linear infinite;"></i> 处理中...';
+      if (typeof lucide !== 'undefined') lucide.createIcons();
+    }
+
+    // 显示进度弹窗
+    showBatchTokenProgressModal();
+
+    // 调用主进程处理
+    const result = await ipcRenderer.invoke('batch-get-all-tokens');
+
+    if (!result.success) {
+      showToast(result.error || '批量获取Token失败', 'error');
+      closeBatchTokenProgressModal();
+    }
+
+  } catch (error) {
+    console.error('批量获取Token失败:', error);
+    showToast('批量获取Token失败: ' + error.message, 'error');
+    closeBatchTokenProgressModal();
+  } finally {
+    // 恢复按钮
+    const btn = document.getElementById('batchGetAllTokensBtn');
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = '<i data-lucide="key" style="width: 16px; height: 16px;"></i> 获取Token';
+      if (typeof lucide !== 'undefined') lucide.createIcons();
+    }
+  }
+}
+
+/**
+ * 显示批量获取Token进度弹窗
+ */
+function showBatchTokenProgressModal() {
+  const modal = document.getElementById('batchTokenProgressModal');
+  if (modal) {
+    // 重置状态
+    document.getElementById('batchTokenProgressText').textContent = '0 / 0';
+    document.getElementById('batchTokenProgressFill').style.width = '0%';
+    document.getElementById('batchTokenCurrentEmail').textContent = '等待开始...';
+    document.getElementById('batchTokenCurrentStatus').textContent = '';
+    document.getElementById('batchTokenSuccessCount').textContent = '0';
+    document.getElementById('batchTokenFailCount').textContent = '0';
+    document.getElementById('batchTokenTotalCount').textContent = '0';
+    document.getElementById('batchTokenLogContainer').innerHTML = '<div style="color: #86868b;">正在启动...</div>';
+    document.getElementById('batchTokenCloseBtn').disabled = true;
+
+    modal.style.display = 'flex';
+    setTimeout(() => modal.classList.add('active'), 10);
+    if (typeof lucide !== 'undefined') lucide.createIcons();
+  }
+}
+
+/**
+ * 关闭批量获取Token进度弹窗
+ */
+function closeBatchTokenProgressModal() {
+  const modal = document.getElementById('batchTokenProgressModal');
+  if (modal) {
+    modal.classList.remove('active');
+    setTimeout(() => {
+      modal.style.display = 'none';
+    }, 200);
+  }
+
+  // 刷新账号列表
+  if (typeof loadAccounts === 'function') {
+    loadAccounts();
+  }
+}
+
+/**
+ * 添加日志到批量Token日志容器
+ */
+function addBatchTokenLog(message, type = 'info') {
+  const container = document.getElementById('batchTokenLogContainer');
+  if (!container) return;
+
+  const colors = {
+    info: '#f5f5f7',
+    success: '#4caf50',
+    error: '#f44336',
+    warning: '#ff9800'
+  };
+
+  const timestamp = new Date().toLocaleTimeString();
+  const logEntry = document.createElement('div');
+  logEntry.style.color = colors[type] || colors.info;
+  logEntry.style.marginBottom = '4px';
+  logEntry.textContent = `[${timestamp}] ${message}`;
+
+  container.appendChild(logEntry);
+  container.scrollTop = container.scrollHeight;
+}
+
+// 监听批量Token进度更新
+ipcRenderer.on('batch-token-progress', (event, data) => {
+  const { current, total, email, status, error } = data;
+
+  // 更新进度
+  document.getElementById('batchTokenProgressText').textContent = `${current} / ${total}`;
+  document.getElementById('batchTokenTotalCount').textContent = total;
+  
+  const percentage = (current / total) * 100;
+  document.getElementById('batchTokenProgressFill').style.width = `${percentage}%`;
+
+  // 更新当前处理账号
+  document.getElementById('batchTokenCurrentEmail').textContent = email;
+
+  // 更新状态
+  if (status === 'processing') {
+    document.getElementById('batchTokenCurrentStatus').textContent = '正在处理...';
+    document.getElementById('batchTokenCurrentStatus').style.color = '#007aff';
+    addBatchTokenLog(`[${current}/${total}] 开始处理: ${email}`, 'info');
+  } else if (status === 'success') {
+    document.getElementById('batchTokenCurrentStatus').textContent = '✅ 成功';
+    document.getElementById('batchTokenCurrentStatus').style.color = '#4caf50';
+    const successCount = parseInt(document.getElementById('batchTokenSuccessCount').textContent) + 1;
+    document.getElementById('batchTokenSuccessCount').textContent = successCount;
+    addBatchTokenLog(`[${current}/${total}] ✅ 成功: ${email}`, 'success');
+  } else if (status === 'failed') {
+    document.getElementById('batchTokenCurrentStatus').textContent = `❌ 失败: ${error || '未知错误'}`;
+    document.getElementById('batchTokenCurrentStatus').style.color = '#f44336';
+    const failCount = parseInt(document.getElementById('batchTokenFailCount').textContent) + 1;
+    document.getElementById('batchTokenFailCount').textContent = failCount;
+    addBatchTokenLog(`[${current}/${total}] ❌ 失败: ${email} - ${error || '未知错误'}`, 'error');
+  }
+});
+
+// 监听批量Token日志
+ipcRenderer.on('batch-token-log', (event, data) => {
+  const { email, message } = data;
+  addBatchTokenLog(`[${email}] ${message}`, 'info');
+});
+
+// 监听批量Token完成
+ipcRenderer.on('batch-token-complete', (event, data) => {
+  const { total, successCount, failCount } = data;
+
+  addBatchTokenLog('', 'info');
+  addBatchTokenLog('========== 批量获取完成 ==========', 'info');
+  addBatchTokenLog(`总计: ${total} 个账号`, 'info');
+  addBatchTokenLog(`成功: ${successCount} 个`, 'success');
+  addBatchTokenLog(`失败: ${failCount} 个`, failCount > 0 ? 'error' : 'info');
+
+  // 启用关闭按钮
+  document.getElementById('batchTokenCloseBtn').disabled = false;
+
+  // 显示完成提示
+  if (failCount === 0) {
+    showToast(`批量获取完成！成功 ${successCount} 个`, 'success');
+  } else {
+    showToast(`批量获取完成！成功 ${successCount} 个，失败 ${failCount} 个`, 'warning');
   }
 });
 

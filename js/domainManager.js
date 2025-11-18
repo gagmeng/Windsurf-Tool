@@ -9,10 +9,21 @@ const DomainManager = {
   domains: [],
   
   /**
-   * 初始化 - 从配置文件加载域名
+   * 初始化 - 从 renderer.js 的 currentConfig 加载域名
    */
   async init() {
     try {
+      console.log('🔄 DomainManager 初始化...');
+      
+      // 优先从 renderer.js 的 currentConfig 读取（避免重复加载）
+      if (window.currentConfig && Array.isArray(window.currentConfig.emailDomains)) {
+        this.domains = [...window.currentConfig.emailDomains];
+        console.log('✅ 从 currentConfig 加载域名:', this.domains);
+        this.renderDomains();
+        return;
+      }
+      
+      // 备用方案：从 ConfigManager 加载
       if (!window.ConfigManager) {
         console.error('❌ ConfigManager 未定义');
         this.domains = [];
@@ -24,6 +35,13 @@ const DomainManager = {
       
       if (result.success && result.config) {
         this.domains = result.config.emailDomains || [];
+        console.log('✅ 从 ConfigManager 加载域名:', this.domains);
+        
+        // 同步到 currentConfig
+        if (window.currentConfig) {
+          window.currentConfig.emailDomains = [...this.domains];
+        }
+        
         this.renderDomains();
       } else {
         console.warn('⚠️ 加载配置失败:', result.message || '未知');
@@ -122,6 +140,21 @@ const DomainManager = {
       console.log('💾 开始保存域名到配置文件...');
       console.log('📋 要保存的域名列表:', this.domains);
       
+      // 1. 同步到 renderer.js 的 currentConfig
+      if (window.currentConfig) {
+        window.currentConfig.emailDomains = [...this.domains];
+        console.log('✅ 已同步到 currentConfig');
+        
+        // 2. 保存到 localStorage
+        try {
+          localStorage.setItem('windsurfConfig', JSON.stringify(window.currentConfig));
+          console.log('✅ 已保存到 localStorage');
+        } catch (e) {
+          console.warn('⚠️ 保存到 localStorage 失败:', e);
+        }
+      }
+      
+      // 3. 保存到配置文件
       const result = await window.ConfigManager.loadConfig();
       console.log('📥 加载配置结果:', result);
       

@@ -1,6 +1,17 @@
 // accountQuery.js - 账号查询模块（订阅类型和积分）
 // 独立模块，不依赖注册流程
 
+const axios = require('axios');
+
+// 常量配置
+const CONFIG = {
+  REQUEST_TIMEOUT: 30000,        // 请求超时30秒
+  QUERY_DELAY: 500,              // 查询延迟500ms
+  AUTO_QUERY_INTERVAL: 5 * 60 * 1000,  // 默认5分钟
+  MIN_INTERVAL: 5,               // 最小间隔5分钟
+  MAX_INTERVAL: 1440             // 最大间隔1440分钟(24小时)
+};
+
 /**
  * 账号查询管理器
  */
@@ -9,7 +20,6 @@ const AccountQuery = {
    * 使用 refresh_token 获取 access_token
    */
   async getAccessToken(refreshToken) {
-    const axios = require('axios');
     const FIREBASE_API_KEY = 'AIzaSyDsOl-1XpT5err0Tcnx8FFod1H8gVGIycY';
     const WORKER_URL = 'https://windsurf.crispvibe.cn';
     
@@ -26,7 +36,8 @@ const AccountQuery = {
           headers: {
             'Content-Type': 'application/json',
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-          }
+          },
+          timeout: CONFIG.REQUEST_TIMEOUT
         }
       );
       
@@ -45,48 +56,41 @@ const AccountQuery = {
    * 使用简化方式：直接用 JSON 格式请求
    */
   async getUsageInfo(accessToken) {
-    const axios = require('axios');
-    
     try {
-      // 方式1: 尝试使用 JSON 格式（简单）
-      try {
-        const response = await axios.post(
-          'https://web-backend.windsurf.com/exa.seat_management_pb.SeatManagementService/GetPlanStatus',
-          {
-            auth_token: accessToken
+      const response = await axios.post(
+        'https://web-backend.windsurf.com/exa.seat_management_pb.SeatManagementService/GetPlanStatus',
+        {
+          auth_token: accessToken
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Auth-Token': accessToken,
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'x-client-version': 'Chrome/JsCore/11.0.0/FirebaseCore-web'
           },
-          {
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Auth-Token': accessToken,
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-              'x-client-version': 'Chrome/JsCore/11.0.0/FirebaseCore-web'
-            }
-          }
-        );
+          timeout: CONFIG.REQUEST_TIMEOUT
+        }
+      );
         
-        // 解析响应
-        const planStatus = response.data.planStatus || response.data;
-        
-        return {
-          planName: planStatus.planInfo?.planName || 'Free',
-          usedCredits: Math.round((planStatus.usedPromptCredits || 0) / 100),
-          totalCredits: Math.round((planStatus.availablePromptCredits || 0) / 100),
-          usagePercentage: 0,
-          expiresAt: planStatus.planInfo?.expiresAt || planStatus.expiresAt || null, // 到期时间
-          planInfo: planStatus.planInfo || null // 完整的套餐信息
-        };
-      } catch (jsonError) {
-        // 如果 JSON 方式失败，返回默认值
-        console.warn('JSON 方式查询失败，返回默认值:', jsonError.message);
-        return {
-          planName: 'Free',
-          usedCredits: 0,
-          totalCredits: 500,
-          usagePercentage: 0
-        };
-      }
+      // 解析响应
+      const planStatus = response.data.planStatus || response.data;
+      
+      // 提取到期时间（Pro账号有planEnd，Free账号没有）
+      const expiresAt = planStatus.planEnd || planStatus.expiresAt || null;
+      
+      return {
+        planName: planStatus.planInfo?.planName || 'Free',
+        usedCredits: Math.round((planStatus.usedPromptCredits || 0) / 100),
+        totalCredits: Math.round((planStatus.availablePromptCredits || 0) / 100),
+        usagePercentage: 0,
+        expiresAt: expiresAt,
+        planStart: planStatus.planStart || null,
+        planInfo: planStatus.planInfo || null
+      };
     } catch (error) {
+      // 查询失败，返回错误状态而不是假数据
+      console.warn('查询使用情况失败:', error.message);
       throw new Error(`查询使用情况失败: ${error.message}`);
     }
   },
@@ -137,12 +141,19 @@ const AccountQuery = {
 
   /**
    * 批量查询所有账号
+   * @param {Array} accounts - 账号列表
+   * @param {Function} progressCallback - 进度回调函数 (current, total)
    */
-  async queryAllAccounts(accounts) {
+  async queryAllAccounts(accounts, progressCallback) {
     const results = [];
     
     for (let i = 0; i < accounts.length; i++) {
       const account = accounts[i];
+      
+      // 调用进度回调
+      if (progressCallback) {
+        progressCallback(i + 1, accounts.length);
+      }
       
       try {
         const result = await this.queryAccount(account);
@@ -167,8 +178,10 @@ const AccountQuery = {
         });
       }
       
-      // 避免请求过快，延迟 500ms
-      await new Promise(resolve => setTimeout(resolve, 500));
+      // 避免请求过快，延迟（最后一个不延迟）
+      if (i < accounts.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, CONFIG.QUERY_DELAY));
+      }
     }
     
     return results;
@@ -180,194 +193,238 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = AccountQuery;
 }
 
-// 全局函数（用于 HTML 调用）
+// 全局函数（用于 HTML 调用）- 封装到命名空间
 if (typeof window !== 'undefined') {
   window.AccountQuery = AccountQuery;
-}
-
-/**
- * 查询并更新账号列表的订阅和积分信息
- */
-async function updateAccountsUsage() {
-  try {
-    // 获取所有账号
-    const result = await window.ipcRenderer.invoke('get-accounts');
-    
-    if (!result || !result.success || !result.accounts) {
+  
+  // 查询状态管理
+  const QueryState = {
+    isQuerying: false,
+    timer: null
+  };
+  
+  /**
+   * 查询并更新账号列表的订阅和积分信息
+   */
+  async function updateAccountsUsage() {
+    // 防止重复查询
+    if (QueryState.isQuerying) {
+      console.warn('[自动查询] 查询正在进行中，跳过本次');
       return;
     }
     
-    const accounts = result.accounts;
+    QueryState.isQuerying = true;
     
-    // 批量查询
-    const results = await AccountQuery.queryAllAccounts(accounts);
-    
-    // 更新 UI
-    let updateCount = 0;
-    results.forEach(result => {
-      const updated = updateAccountUI(result.email, result);
-      if (updated) {
-        updateCount++;
+    try {
+      // 获取所有账号
+      const result = await window.ipcRenderer.invoke('get-accounts');
+      
+      if (!result || !result.success || !result.accounts) {
+        return;
       }
-    });
-  } catch (error) {
-    console.error('[自动查询] 查询失败:', error);
+      
+      const accounts = result.accounts;
+      
+      // 批量查询
+      const results = await AccountQuery.queryAllAccounts(accounts);
+      
+      // 先更新JSON文件（持久化数据）
+      let updateCount = 0;
+      for (const result of results) {
+        if (result.success) {
+          try {
+            // 查找对应的账号
+            const account = accounts.find(acc => acc.email === result.email);
+            if (account) {
+              // 准备更新数据
+              const updateData = {
+                id: account.id,
+                type: result.planName,
+                credits: result.totalCredits,
+                usage: result.usagePercentage,
+                queryUpdatedAt: new Date().toISOString()
+              };
+              
+              // 只有当expiresAt有值时才更新
+              if (result.expiresAt) {
+                updateData.expiresAt = result.expiresAt;
+              }
+              
+              // 更新账号信息到JSON文件
+              await window.ipcRenderer.invoke('update-account', updateData);
+              updateCount++;
+            }
+          } catch (error) {
+            console.error(`[自动查询] ❌ 更新 ${result.email} 失败:`, error);
+          }
+        }
+      }
+      
+      // 重新加载账号列表以刷新UI
+      if (typeof AccountManager !== 'undefined' && AccountManager.loadAccounts) {
+        await AccountManager.loadAccounts();
+      }
+    } catch (error) {
+      console.error('[自动查询] 查询失败:', error);
+    } finally {
+      QueryState.isQuerying = false;
+    }
   }
-}
 
 /**
- * 更新单个账号的 UI 显示
+ * 更新单个账号的 UI 显示（已废弃，现在通过重新加载列表更新）
+ * 保留此函数以防其他地方调用
  * @returns {Boolean} 是否成功更新
  */
 function updateAccountUI(email, usageInfo) {
-  // 查找对应的账号行
-  const accountRows = document.querySelectorAll('.account-row-data');
+  // 使用data-email属性精确查找
+  const row = document.querySelector(`.account-item[data-email="${email}"]`);
   
-  if (accountRows.length === 0) {
-    console.warn(`[UI更新] 未找到任何账号行`);
+  if (!row) {
+    console.warn(`[UI更新] 未找到邮箱为 ${email} 的账号行`);
     return false;
   }
   
-  for (const row of accountRows) {
-    const rowEmail = row.querySelector('.account-col-email')?.textContent;
-    
-    if (rowEmail === email) {
-      // 更新订阅类型
-      const typeElement = row.querySelector('.account-col-type .type-badge');
-      if (typeElement) {
-        typeElement.textContent = usageInfo.planName || 'Free';
-        
-        // 根据套餐类型设置颜色
-        if (usageInfo.planName === 'Pro') {
-          typeElement.style.color = '#007aff';
-        } else if (usageInfo.planName === 'Free') {
-          typeElement.style.color = '#86868b';
-        } else {
-          typeElement.style.color = '#ff3b30';
-        }
-      }
-      
-      // 更新积分信息
-      const creditsElement = row.querySelector('.account-col-credits');
-      if (creditsElement) {
-        if (usageInfo.success) {
-          creditsElement.textContent = `${usageInfo.usedCredits}/${usageInfo.totalCredits}`;
-          
-          // 根据使用率设置颜色
-          if (usageInfo.usagePercentage >= 80) {
-            creditsElement.style.color = '#ff3b30';
-          } else if (usageInfo.usagePercentage >= 50) {
-            creditsElement.style.color = '#ff9500';
-          } else {
-            creditsElement.style.color = '#34c759';
-          }
-        } else {
-          creditsElement.textContent = '查询失败';
-          creditsElement.style.color = '#ff3b30';
-        }
-      }
-      
-      // 更新使用率
-      const usageElement = row.querySelector('.account-col-usage');
-      if (usageElement) {
-        if (usageInfo.success) {
-          usageElement.textContent = `${usageInfo.usagePercentage}%`;
-          
-          // 根据使用率设置颜色
-          if (usageInfo.usagePercentage >= 80) {
-            usageElement.style.color = '#ff3b30';
-          } else if (usageInfo.usagePercentage >= 50) {
-            usageElement.style.color = '#ff9500';
-          } else {
-            usageElement.style.color = '#34c759';
-          }
-        } else {
-          usageElement.textContent = '-';
-          usageElement.style.color = '#86868b';
-        }
-      }
-      
-      console.log(`[UI更新] ✅ 已更新 ${email} 的显示`);
-      return true;
-    }
-  }
-  
-  console.warn(`[UI更新] ⚠️ 未找到 ${email} 对应的行`);
-  return false;
-}
-
-// 存储定时器ID，用于重启
-let autoQueryTimer = null;
-
-/**
- * 启动自动定时查询
- * @param {Number} interval - 查询间隔（毫秒），默认 5 分钟
- */
-function startAutoQuery(interval = 5 * 60 * 1000) {
-  // 立即执行一次
-  updateAccountsUsage();
-  
-  // 定时执行
-  autoQueryTimer = setInterval(() => {
-    updateAccountsUsage();
-  }, interval);
-  
-  console.log(`[自动查询] 已启动，间隔: ${interval / 1000} 秒 (${interval / 60000} 分钟)`);
-}
-
-/**
- * 停止自动查询
- */
-function stopAutoQuery() {
-  if (autoQueryTimer) {
-    clearInterval(autoQueryTimer);
-    autoQueryTimer = null;
-    console.log('[自动查询] 已停止');
-  }
-}
-
-/**
- * 重启自动查询（用于配置更改后）
- * @param {Number} intervalMinutes - 查询间隔（分钟）
- */
-function restartAutoQuery(intervalMinutes) {
-  console.log(`[自动查询] 重启查询，新间隔: ${intervalMinutes} 分钟`);
-  stopAutoQuery();
-  const intervalMs = intervalMinutes * 60 * 1000;
-  startAutoQuery(intervalMs);
-}
-
-// 挂载到全局，供配置页面调用
-if (typeof window !== 'undefined') {
-  window.restartAutoQuery = restartAutoQuery;
-}
-
-/**
- * 从配置中读取查询间隔
- */
-function getQueryIntervalFromConfig() {
   try {
-    // 从 localStorage 读取配置
-    const configStr = localStorage.getItem('windsurfConfig');
-    if (configStr) {
-      const config = JSON.parse(configStr);
-      const interval = parseInt(config.queryInterval);
-      if (!isNaN(interval) && interval >= 1 && interval <= 1440) {
-        return interval * 60 * 1000; // 转换为毫秒
+    // 更新订阅类型
+    const typeElement = row.querySelector('.acc-col-type');
+    if (typeElement) {
+      typeElement.textContent = usageInfo.planName || 'Free';
+      
+      // 根据套餐类型设置颜色
+      if (usageInfo.planName === 'Pro') {
+        typeElement.style.color = '#007aff';
+      } else if (usageInfo.planName === 'Free') {
+        typeElement.style.color = '#86868b';
+      } else {
+        typeElement.style.color = '#ff3b30';
       }
     }
+    
+    // 更新积分信息
+    const creditsElement = row.querySelector('.acc-col-credits');
+    if (creditsElement) {
+      if (usageInfo.success) {
+        creditsElement.textContent = `${usageInfo.usedCredits}/${usageInfo.totalCredits}`;
+        
+        // 根据使用率设置颜色
+        if (usageInfo.usagePercentage >= 80) {
+          creditsElement.style.color = '#ff3b30';
+        } else if (usageInfo.usagePercentage >= 50) {
+          creditsElement.style.color = '#ff9500';
+        } else {
+          creditsElement.style.color = '#34c759';
+        }
+      } else {
+        creditsElement.textContent = '查询失败';
+        creditsElement.style.color = '#ff3b30';
+      }
+    }
+    
+    // 更新使用率
+    const usageElement = row.querySelector('.acc-col-usage');
+    if (usageElement) {
+      if (usageInfo.success) {
+        usageElement.textContent = `${usageInfo.usagePercentage}%`;
+        
+        // 根据使用率设置颜色
+        if (usageInfo.usagePercentage >= 80) {
+          usageElement.style.color = '#ff3b30';
+        } else if (usageInfo.usagePercentage >= 50) {
+          usageElement.style.color = '#ff9500';
+        } else {
+          usageElement.style.color = '#34c759';
+        }
+      } else {
+        usageElement.textContent = '-';
+        usageElement.style.color = '#86868b';
+      }
+    }
+    
+    console.log(`[UI更新] ✅ 已更新 ${email} 的显示`);
+    return true;
   } catch (error) {
-    console.error('[自动查询] 读取配置失败:', error);
+    console.error(`[UI更新] ❌ 更新 ${email} 失败:`, error);
+    return false;
   }
-  // 默认 5 分钟
-  return 5 * 60 * 1000;
 }
-
-// 页面加载时启动自动查询
-if (typeof window !== 'undefined') {
+  
+  /**
+   * 启动自动定时查询
+   * @param {Number} interval - 查询间隔（毫秒）
+   */
+  function startAutoQuery(interval = CONFIG.AUTO_QUERY_INTERVAL) {
+    // 先停止旧定时器，避免重复
+    stopAutoQuery();
+    
+    // 立即执行一次
+    updateAccountsUsage();
+    
+    // 定时执行
+    QueryState.timer = setInterval(() => {
+      updateAccountsUsage();
+    }, interval);
+    
+    console.log(`[自动查询] 已启动，间隔: ${interval / 1000} 秒 (${interval / 60000} 分钟)`);
+  }
+  
+  /**
+   * 停止自动查询
+   */
+  function stopAutoQuery() {
+    if (QueryState.timer) {
+      clearInterval(QueryState.timer);
+      QueryState.timer = null;
+      console.log('[自动查询] 已停止');
+    }
+  }
+  
+  /**
+   * 重启自动查询（用于配置更改后）
+   * @param {Number} intervalMinutes - 查询间隔（分钟）
+   */
+  function restartAutoQuery(intervalMinutes) {
+    console.log(`[自动查询] 重启查询，新间隔: ${intervalMinutes} 分钟`);
+    stopAutoQuery();
+    const intervalMs = intervalMinutes * 60 * 1000;
+    startAutoQuery(intervalMs);
+  }
+  
+  /**
+   * 从配置中读取查询间隔
+   */
+  function getQueryIntervalFromConfig() {
+    try {
+      // 从 localStorage 读取配置
+      const configStr = localStorage.getItem('windsurfConfig');
+      if (configStr) {
+        const config = JSON.parse(configStr);
+        const interval = parseInt(config.queryInterval);
+        if (!isNaN(interval) && interval >= CONFIG.MIN_INTERVAL && interval <= CONFIG.MAX_INTERVAL) {
+          return interval * 60 * 1000; // 转换为毫秒
+        }
+      }
+    } catch (error) {
+      console.error('[自动查询] 读取配置失败:', error);
+    }
+    // 默认值
+    return CONFIG.AUTO_QUERY_INTERVAL;
+  }
+  
+  // 挂载到全局
+  window.restartAutoQuery = restartAutoQuery;
+  window.stopAutoQuery = stopAutoQuery;
+  
+  // 页面加载时启动自动查询
   window.addEventListener('DOMContentLoaded', () => {
     const interval = getQueryIntervalFromConfig();
     console.log(`[自动查询] 从配置读取间隔: ${interval / 60000} 分钟`);
     startAutoQuery(interval);
+  });
+  
+  // 页面卸载时清理定时器
+  window.addEventListener('beforeunload', () => {
+    stopAutoQuery();
+    console.log('[自动查询] 页面卸载，已清理定时器');
   });
 }

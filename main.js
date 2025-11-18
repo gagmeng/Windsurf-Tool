@@ -1,10 +1,12 @@
-const { app, BrowserWindow, ipcMain, dialog, screen, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, dialog, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs').promises;
+const os = require('os');
+const accountsFileLock = require('./src/accountsFileLock');
 const { exec } = require('child_process');
 const util = require('util');
 const execPromise = util.promisify(exec);
-const VersionManager = require('./src/versionManager');
+const VersionManager = require(path.join(__dirname, 'src', 'versionManager'));
 
 let mainWindow;
 let versionManager;
@@ -16,8 +18,52 @@ let isForceUpdateActive = false;
 let isMaintenanceModeActive = false;
 let isApiUnavailable = false;
 
-// 应用名称
-app.setName('windsurf-tool');
+// 应用名称 - 必须设置为 'Windsurf' 以使用相同的 Keychain 密钥
+app.setName('Windsurf');
+
+// 设置独立的用户数据目录（不与 Windsurf 共享）
+// 注意：必须在复制 Local State 之前设置，确保路径一致
+const appDataPath = app.getPath('appData');
+const toolUserData = path.join(appDataPath, 'windsurf-tool');
+app.setPath('userData', toolUserData);
+
+// Windows: 复制 Windsurf 的 Local State 文件到工具目录
+// 这样 safeStorage 才能正确加密/解密数据
+if (process.platform === 'win32') {
+  const windsurfUserData = path.join(appDataPath, 'Windsurf');
+  const windsurfLocalState = path.join(windsurfUserData, 'Local State');
+  const toolLocalState = path.join(toolUserData, 'Local State');
+  
+  try {
+    const fs = require('fs');
+    // 确保工具目录存在
+    if (!fs.existsSync(toolUserData)) {
+      fs.mkdirSync(toolUserData, { recursive: true });
+    }
+    
+    // 如果 Windsurf 的 Local State 存在，复制到工具目录
+    if (fs.existsSync(windsurfLocalState)) {
+      // 每次启动都检查并更新 Local State（确保使用最新的加密密钥）
+      const shouldCopy = !fs.existsSync(toolLocalState) || 
+                        fs.statSync(windsurfLocalState).mtimeMs > fs.statSync(toolLocalState).mtimeMs;
+      
+      if (shouldCopy) {
+        fs.copyFileSync(windsurfLocalState, toolLocalState);
+        console.log('[初始化] ✅ 已复制 Windsurf Local State 到工具目录');
+        console.log(`[初始化]    源: ${windsurfLocalState}`);
+        console.log(`[初始化]    目标: ${toolLocalState}`);
+      } else {
+        console.log('[初始化] ℹ️  Local State 已是最新，无需复制');
+      }
+    } else {
+      console.warn('[初始化] ⚠️ 未找到 Windsurf Local State，加密可能失败');
+      console.warn(`[初始化]    期望路径: ${windsurfLocalState}`);
+      console.warn('[初始化]    请确保 Windsurf 已安装并至少运行过一次');
+    }
+  } catch (error) {
+    console.error('[初始化] ❌ 复制 Local State 失败:', error.message);
+  }
+}
 
 // 跨平台安全路径获取函数
 function getSafePath(base, ...paths) {
@@ -33,13 +79,17 @@ const LANGUAGE_FILE = getSafePath(userDataPath, 'language.json');
 function initVersionManager() {
   versionManager = new VersionManager();
   
-  // 启动时检查版本和维护模式（必须成功才能使用软件）
+  // 启动时检查版本和维护模式
   setTimeout(async () => {
     try {
+      console.log('🚀 启动时版本检查...');
       const updateInfo = await versionManager.checkForUpdates();
+      
+      console.log('✅ 版本检查完成:', updateInfo);
       
       // 只有真正需要更新时才发送通知到渲染进程
       if (updateInfo.hasUpdate && mainWindow && !mainWindow.isDestroyed()) {
+        console.log('📢 发送版本更新通知到渲染进程');
         mainWindow.webContents.send('version-update-available', {
           currentVersion: updateInfo.currentVersion,
           latestVersion: updateInfo.latestVersion,
@@ -49,6 +99,8 @@ function initVersionManager() {
           updateMessage: updateInfo.updateMessage,
           downloadUrl: versionManager.getDownloadUrl()
         });
+      } else {
+        console.log('ℹ️ 无需更新或版本检测异常（已安全处理）');
       }
     } catch (error) {
       // 检查是否是维护模式
@@ -58,6 +110,7 @@ function initVersionManager() {
       } else {
         // API 无法访问 - 不允许使用软件
         console.error('❌ 无法连接到服务器，软件无法使用');
+        console.error('错误详情:', error);
         isApiUnavailable = true;
         
         // 关闭开发者工具
@@ -68,7 +121,7 @@ function initVersionManager() {
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('api-unavailable', {
             error: error.message,
-            message: '无法连接到服务器，请检查网络连接后重启软件'
+            message: '无法连接到服务器，请检查网络连接。如果开启了代理/VPN，请关闭后重试。'
           });
         }
       }
@@ -304,9 +357,24 @@ async function initializeConfigFiles() {
     try {
       await fs.access(accountsFile);
       console.log(`✅ 账号文件已存在: ${accountsFile}`);
+      
+      // 验证文件内容是否有效
+      try {
+        const data = await fs.readFile(accountsFile, 'utf-8');
+        const accounts = JSON.parse(data);
+        if (!Array.isArray(accounts)) {
+          console.warn('⚠️ 账号文件格式错误，修复为空数组');
+          await fs.writeFile(accountsFile, JSON.stringify([], null, 2));
+        } else {
+          console.log(`📋 账号文件包含 ${accounts.length} 个账号`);
+        }
+      } catch (parseError) {
+        console.warn('⚠️ 账号文件解析失败，修复为空数组');
+        await fs.writeFile(accountsFile, JSON.stringify([], null, 2));
+      }
     } catch (error) {
-      // 创建空的账号文件
-      console.log(`ℹ️ 创建空的账号文件: ${accountsFile}`);
+      // 创建空的账号文件（仅当文件不存在时）
+      console.log(`ℹ️ 账号文件不存在，创建空文件: ${accountsFile}`);
       await fs.mkdir(path.dirname(accountsFile), { recursive: true });
       await fs.writeFile(accountsFile, JSON.stringify([], null, 2));
       console.log(`✅ 空的账号文件已创建`);
@@ -319,7 +387,180 @@ async function initializeConfigFiles() {
 // 应用准备就绪时初始化配置并创建窗口
 app.whenReady().then(async () => {
   await initializeConfigFiles();
+  
   createWindow();
+});
+
+// 批量获取所有账号Token
+ipcMain.handle('batch-get-all-tokens', async (event) => {
+  try {
+    console.log('[批量获取Token] 开始批量获取所有账号Token...');
+    
+    // 读取所有账号
+    const accountsFilePath = path.normalize(ACCOUNTS_FILE);
+    const accountsData = await fs.readFile(accountsFilePath, 'utf-8');
+    const accounts = JSON.parse(accountsData);
+    
+    // 筛选出有密码但没有 apiKey 的账号
+    const accountsNeedToken = accounts.filter(acc => acc.email && acc.password && !acc.apiKey);
+    
+    if (accountsNeedToken.length === 0) {
+      return {
+        success: false,
+        error: '没有需要获取Token的账号（所有账号都已有Token或缺少密码）'
+      };
+    }
+    
+    console.log(`[批量获取Token] 找到 ${accountsNeedToken.length} 个需要获取Token的账号`);
+    
+    const AccountLogin = require(path.join(__dirname, 'js', 'accountLogin'));
+    const results = [];
+    let successCount = 0;
+    let failCount = 0;
+    
+    // 顺序处理每个账号
+    for (let i = 0; i < accountsNeedToken.length; i++) {
+      const account = accountsNeedToken[i];
+      
+      // 发送进度更新
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('batch-token-progress', {
+          current: i + 1,
+          total: accountsNeedToken.length,
+          email: account.email,
+          status: 'processing'
+        });
+      }
+      
+      try {
+        console.log(`[批量获取Token] [${i + 1}/${accountsNeedToken.length}] 处理账号: ${account.email}`);
+        
+        const loginBot = new AccountLogin();
+        
+        // 日志回调
+        const logCallback = (message) => {
+          console.log(`[批量获取Token] [${account.email}] ${message}`);
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('batch-token-log', {
+              email: account.email,
+              message: message
+            });
+          }
+        };
+        
+        // 获取Token
+        const result = await loginBot.loginAndGetTokens(account, logCallback);
+        
+        if (result.success && result.account) {
+          // 更新账号信息到文件
+          const index = accounts.findIndex(acc => acc.id === account.id || acc.email === account.email);
+          if (index !== -1) {
+            accounts[index] = {
+              ...accounts[index],
+              ...result.account,
+              id: accounts[index].id,
+              createdAt: accounts[index].createdAt
+            };
+          }
+          
+          successCount++;
+          results.push({
+            email: account.email,
+            success: true
+          });
+          
+          // 发送成功状态
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('batch-token-progress', {
+              current: i + 1,
+              total: accountsNeedToken.length,
+              email: account.email,
+              status: 'success'
+            });
+          }
+          
+          console.log(`[批量获取Token] [${i + 1}/${accountsNeedToken.length}] ✅ 成功: ${account.email}`);
+        } else {
+          failCount++;
+          results.push({
+            email: account.email,
+            success: false,
+            error: result.error
+          });
+          
+          // 发送失败状态
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('batch-token-progress', {
+              current: i + 1,
+              total: accountsNeedToken.length,
+              email: account.email,
+              status: 'failed',
+              error: result.error
+            });
+          }
+          
+          console.log(`[批量获取Token] [${i + 1}/${accountsNeedToken.length}] ❌ 失败: ${account.email} - ${result.error}`);
+        }
+        
+        // 每个账号之间延迟1秒，避免请求过快
+        if (i < accountsNeedToken.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+        
+      } catch (error) {
+        failCount++;
+        results.push({
+          email: account.email,
+          success: false,
+          error: error.message
+        });
+        
+        console.error(`[批量获取Token] [${i + 1}/${accountsNeedToken.length}] ❌ 异常: ${account.email}`, error);
+        
+        // 发送失败状态
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('batch-token-progress', {
+            current: i + 1,
+            total: accountsNeedToken.length,
+            email: account.email,
+            status: 'failed',
+            error: error.message
+          });
+        }
+      }
+    }
+    
+    // 保存更新后的账号列表
+    await fs.writeFile(accountsFilePath, JSON.stringify(accounts, null, 2), 'utf-8');
+    console.log(`[批量获取Token] 账号列表已更新到文件`);
+    
+    // 发送完成状态
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('batch-token-complete', {
+        total: accountsNeedToken.length,
+        successCount,
+        failCount,
+        results
+      });
+    }
+    
+    console.log(`[批量获取Token] 完成！成功: ${successCount}, 失败: ${failCount}`);
+    
+    return {
+      success: true,
+      total: accountsNeedToken.length,
+      successCount,
+      failCount,
+      results
+    };
+    
+  } catch (error) {
+    console.error('[批量获取Token] 失败:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
 });
 
 // 监听退出应用请求
@@ -402,24 +643,27 @@ ipcMain.handle('get-language', async () => {
   }
 });
 
-// 读取账号列表
+// 读取账号列表（使用文件锁）
 ipcMain.handle('get-accounts', async () => {
-  try {
-    // 确保目录存在
-    await fs.mkdir(path.dirname(ACCOUNTS_FILE), { recursive: true });
-    
+  return await accountsFileLock.acquire(async () => {
     try {
-      const data = await fs.readFile(ACCOUNTS_FILE, 'utf-8');
-      const accounts = JSON.parse(data);
-      return { success: true, accounts: Array.isArray(accounts) ? accounts : [] };
+      // 确保目录存在
+      await fs.mkdir(path.dirname(ACCOUNTS_FILE), { recursive: true });
+      
+      try {
+        const data = await fs.readFile(ACCOUNTS_FILE, 'utf-8');
+        const accounts = JSON.parse(data);
+        console.log(`📖 读取账号列表: ${Array.isArray(accounts) ? accounts.length : 0} 个账号`);
+        return { success: true, accounts: Array.isArray(accounts) ? accounts : [] };
+      } catch (error) {
+        console.error('读取账号文件失败:', error);
+        return { success: true, accounts: [] };
+      }
     } catch (error) {
-      console.error('读取账号文件失败:', error);
-      return { success: true, accounts: [] };
+      console.error('创建账号目录失败:', error);
+      return { success: false, error: error.message };
     }
-  } catch (error) {
-    console.error('创建账号目录失败:', error);
-    return { success: false, error: error.message };
-  }
+  });
 });
 
 // 读取账号列表（别名，用于兼容）
@@ -442,173 +686,193 @@ ipcMain.handle('load-accounts', async () => {
   }
 });
 
-// 添加账号 - 跨平台兼容
+// 添加账号 - 跨平台兼容（使用文件锁）
 ipcMain.handle('add-account', async (event, account) => {
   if (!isOperationAllowed('add-account')) {
     return { success: false, error: '当前状态下无法执行此操作' };
   }
-  try {
-    // 验证账号数据
-    if (!account || !account.email || !account.password) {
-      return { success: false, error: '账号数据不完整，缺少邮箱或密码' };
-    }
-    
-    // 规范化路径（跨平台兼容）
-    const accountsFilePath = path.normalize(ACCOUNTS_FILE);
-    const accountsDir = path.dirname(accountsFilePath);
-    
-    // 确保目录存在
-    await fs.mkdir(accountsDir, { recursive: true });
-    console.log(`✅ 账号目录已准备: ${accountsDir}`);
-    
-    let accounts = [];
+  
+  return await accountsFileLock.acquire(async () => {
     try {
-      const data = await fs.readFile(accountsFilePath, 'utf-8');
-      accounts = JSON.parse(data);
-      if (!Array.isArray(accounts)) {
-        console.warn('⚠️ 账号文件格式错误，重置为空数组');
-        accounts = [];
+      // 验证账号数据
+      if (!account || !account.email || !account.password) {
+        return { success: false, error: '账号数据不完整，缺少邮箱或密码' };
       }
+      
+      // 规范化路径（跨平台兼容）
+      const accountsFilePath = path.normalize(ACCOUNTS_FILE);
+      const accountsDir = path.dirname(accountsFilePath);
+      
+      // 确保目录存在
+      await fs.mkdir(accountsDir, { recursive: true });
+      console.log(`✅ 账号目录已准备: ${accountsDir}`);
+      
+      let accounts = [];
+      try {
+        const data = await fs.readFile(accountsFilePath, 'utf-8');
+        accounts = JSON.parse(data);
+        if (!Array.isArray(accounts)) {
+          console.warn('⚠️ 账号文件格式错误，重置为空数组');
+          accounts = [];
+        }
+      } catch (error) {
+        // 文件不存在或无法读取，使用空数组
+        console.log('ℹ️ 账号文件不存在，将创建新文件');
+      }
+      
+      // 检查是否已存在相同邮箱
+      const existingAccount = accounts.find(acc => acc.email === account.email);
+      if (existingAccount) {
+        return { success: false, error: `账号 ${account.email} 已存在` };
+      }
+      
+      // 添加ID和创建时间
+      account.id = Date.now().toString();
+      account.createdAt = new Date().toISOString();
+      accounts.push(account);
+      
+      // 保存文件（使用 UTF-8 编码）
+      await fs.writeFile(accountsFilePath, JSON.stringify(accounts, null, 2), { encoding: 'utf-8' });
+      console.log(`✅ 账号已添加: ${account.email} (总数: ${accounts.length})`);
+      
+      return { success: true, account };
     } catch (error) {
-      // 文件不存在或无法读取，使用空数组
-      console.log('ℹ️ 账号文件不存在，将创建新文件');
+      console.error('添加账号失败:', error);
+      return { success: false, error: `添加失败: ${error.message}` };
     }
-    
-    // 检查是否已存在相同邮箱
-    const existingAccount = accounts.find(acc => acc.email === account.email);
-    if (existingAccount) {
-      return { success: false, error: `账号 ${account.email} 已存在` };
-    }
-    
-    // 添加账号信息
-    account.id = Date.now().toString();
-    account.createdAt = new Date().toISOString();
-    accounts.push(account);
-    
-    // 保存文件（使用 UTF-8 编码）
-    await fs.writeFile(accountsFilePath, JSON.stringify(accounts, null, 2), { encoding: 'utf-8' });
-    console.log(`✅ 账号已添加: ${account.email}`);
-    
-    return { success: true, account };
-  } catch (error) {
-    console.error('添加账号失败:', error);
-    return { success: false, error: `添加失败: ${error.message}` };
-  }
+  });
 });
 
-// 更新账号 - 跨平台兼容
+// 更新账号 - 跨平台兼容（使用文件锁）
 ipcMain.handle('update-account', async (event, accountUpdate) => {
-  try {
-    // 规范化路径
-    const accountsFilePath = path.normalize(ACCOUNTS_FILE);
-    const accountsDir = path.dirname(accountsFilePath);
-    
-    // 确保目录存在
-    await fs.mkdir(accountsDir, { recursive: true });
-    
-    // 读取现有账号
-    let accounts = [];
+  return await accountsFileLock.acquire(async () => {
     try {
-      const data = await fs.readFile(accountsFilePath, 'utf-8');
-      accounts = JSON.parse(data);
-      if (!Array.isArray(accounts)) {
-        return { success: false, error: '账号文件格式错误' };
+      // 规范化路径
+      const accountsFilePath = path.normalize(ACCOUNTS_FILE);
+      const accountsDir = path.dirname(accountsFilePath);
+      
+      // 确保目录存在
+      await fs.mkdir(accountsDir, { recursive: true });
+      
+      try {
+        const data = await fs.readFile(accountsFilePath, 'utf-8');
+        let accounts = JSON.parse(data);
+        
+        if (!Array.isArray(accounts)) {
+          return { success: false, error: '账号文件格式错误' };
+        }
+        
+        // 检查账号是否存在
+        const index = accounts.findIndex(acc => acc.id === accountUpdate.id);
+        if (index === -1) {
+          return { success: false, error: '账号不存在' };
+        }
+        
+        // 更新账号属性
+        accounts[index] = { ...accounts[index], ...accountUpdate, updatedAt: new Date().toISOString() };
+        
+        // 保存更新后的账号列表
+        await fs.writeFile(accountsFilePath, JSON.stringify(accounts, null, 2), { encoding: 'utf-8' });
+        console.log(`✅ 账号已更新: ${accounts[index].email} (总数: ${accounts.length})`);
+        
+        return { 
+          success: true, 
+          message: '账号更新成功',
+          account: accounts[index]
+        };
+      } catch (error) {
+        console.error('读取账号文件失败:', error);
+        return { success: false, error: `更新失败: ${error.message}` };
       }
     } catch (error) {
-      return { success: false, error: '账号文件不存在或损坏' };
+      console.error('更新账号失败:', error);
+      return { success: false, error: `更新失败: ${error.message}` };
     }
-    
-    // 查找要更新的账号
-    const index = accounts.findIndex(acc => acc.id === accountUpdate.id);
-    if (index === -1) {
-      return { success: false, error: '账号不存在' };
-    }
-    
-    // 更新账号属性
-    accounts[index] = { ...accounts[index], ...accountUpdate, updatedAt: new Date().toISOString() };
-    
-    // 保存更新后的账号列表
-    await fs.writeFile(accountsFilePath, JSON.stringify(accounts, null, 2), { encoding: 'utf-8' });
-    console.log(`✅ 账号已更新: ${accounts[index].email}`);
-    
-    return { 
-      success: true, 
-      message: '账号更新成功',
-      account: accounts[index]
-    };
-  } catch (error) {
-    console.error('更新账号失败:', error);
-    return { success: false, error: `更新失败: ${error.message}` };
-  }
+  });
 });
 
-// 删除账号 - 跨平台兼容
+// 删除账号 - 跨平台兼容（使用文件锁）
 ipcMain.handle('delete-account', async (event, accountId) => {
   if (!isOperationAllowed('delete-account')) {
     return { success: false, error: '当前状态下无法执行此操作' };
   }
-  try {
-    // 规范化路径
-    const accountsFilePath = path.normalize(ACCOUNTS_FILE);
-    const accountsDir = path.dirname(accountsFilePath);
-    
-    // 确保目录存在
-    await fs.mkdir(accountsDir, { recursive: true });
-    
+  
+  return await accountsFileLock.acquire(async () => {
     try {
-      const data = await fs.readFile(accountsFilePath, 'utf-8');
-      let accounts = JSON.parse(data);
+      // 规范化路径
+      const accountsFilePath = path.normalize(ACCOUNTS_FILE);
+      const accountsDir = path.dirname(accountsFilePath);
       
-      if (!Array.isArray(accounts)) {
-        return { success: false, error: '账号文件格式错误' };
+      // 确保目录存在
+      await fs.mkdir(accountsDir, { recursive: true });
+      
+      try {
+        const data = await fs.readFile(accountsFilePath, 'utf-8');
+        let accounts = JSON.parse(data);
+        
+        if (!Array.isArray(accounts)) {
+          return { success: false, error: '账号文件格式错误' };
+        }
+        
+        // 检查账号是否存在
+        const index = accounts.findIndex(acc => acc.id === accountId);
+        if (index === -1) {
+          return { success: false, error: '账号不存在' };
+        }
+        
+        const deletedEmail = accounts[index].email;
+        accounts.splice(index, 1);
+        
+        await fs.writeFile(accountsFilePath, JSON.stringify(accounts, null, 2), { encoding: 'utf-8' });
+        console.log(`✅ 账号已删除: ${deletedEmail} (剩余: ${accounts.length})`);
+        
+        return { success: true };
+      } catch (error) {
+        console.error('读取账号文件失败:', error);
+        return { success: false, error: `删除失败: ${error.message}` };
       }
-      
-      // 检查账号是否存在
-      const index = accounts.findIndex(acc => acc.id === accountId);
-      if (index === -1) {
-        return { success: false, error: '账号不存在' };
-      }
-      
-      const deletedEmail = accounts[index].email;
-      accounts.splice(index, 1);
-      
-      await fs.writeFile(accountsFilePath, JSON.stringify(accounts, null, 2), { encoding: 'utf-8' });
-      console.log(`✅ 账号已删除: ${deletedEmail}`);
-      
-      return { success: true };
     } catch (error) {
-      console.error('读取账号文件失败:', error);
+      console.error('创建账号目录失败:', error);
       return { success: false, error: `删除失败: ${error.message}` };
     }
-  } catch (error) {
-    console.error('创建账号目录失败:', error);
-    return { success: false, error: `删除失败: ${error.message}` };
-  }
+  });
 });
 
-// 删除全部账号 - 跨平台兼容
+// 删除全部账号 - 跨平台兼容（使用文件锁）
 ipcMain.handle('delete-all-accounts', async () => {
-  try {
-    // 规范化路径
-    const accountsFilePath = path.normalize(ACCOUNTS_FILE);
-    const accountsDir = path.dirname(accountsFilePath);
-    
-    // 确保目录存在
-    await fs.mkdir(accountsDir, { recursive: true });
-    
+  return await accountsFileLock.acquire(async () => {
     try {
-      // 直接写入空数组
-      await fs.writeFile(accountsFilePath, JSON.stringify([], null, 2), { encoding: 'utf-8' });
-      console.log('✅ 已删除全部账号');
-      return { success: true };
+      // 规范化路径
+      const accountsFilePath = path.normalize(ACCOUNTS_FILE);
+      const accountsDir = path.dirname(accountsFilePath);
+      
+      // 确保目录存在
+      await fs.mkdir(accountsDir, { recursive: true });
+      
+      try {
+        // 先读取当前账号数量（用于日志）
+        let oldCount = 0;
+        try {
+          const data = await fs.readFile(accountsFilePath, 'utf-8');
+          const accounts = JSON.parse(data);
+          oldCount = Array.isArray(accounts) ? accounts.length : 0;
+        } catch (e) {
+          // 忽略读取错误
+        }
+        
+        // 写入空数组
+        await fs.writeFile(accountsFilePath, JSON.stringify([], null, 2), { encoding: 'utf-8' });
+        console.log(`✅ 已删除全部账号 (共 ${oldCount} 个)`);
+        return { success: true };
+      } catch (error) {
+        console.error('写入账号文件失败:', error);
+        return { success: false, error: `删除失败: ${error.message}` };
+      }
     } catch (error) {
-      console.error('删除全部账号失败:', error);
+      console.error('创建账号目录失败:', error);
       return { success: false, error: `删除失败: ${error.message}` };
     }
-  } catch (error) {
-    console.error('创建账号目录失败:', error);
-    return { success: false, error: `删除失败: ${error.message}` };
-  }
+  });
 });
 
 // 刷新账号积分信息
@@ -692,6 +956,21 @@ ipcMain.handle('open-download-url', async (event, downloadUrl) => {
     }
   } catch (error) {
     console.error('打开下载链接失败:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// 打开外部URL（通用）
+ipcMain.handle('open-external-url', async (event, url) => {
+  try {
+    if (url) {
+      await shell.openExternal(url);
+      return { success: true };
+    } else {
+      return { success: false, error: 'URL不能为空' };
+    }
+  } catch (error) {
+    console.error('打开外部URL失败:', error);
     return { success: false, error: error.message };
   }
 });
@@ -785,7 +1064,10 @@ ipcMain.handle('set-version-check-interval', async (event, interval) => {
 
 // 批量注册账号
 ipcMain.handle('batch-register', async (event, config) => {
-  const RegistrationBot = require('./src/registrationBot');
+  // 使用 JavaScript 版本注册机器人
+  const RegistrationBot = require(path.join(__dirname, 'src', 'registrationBot'));
+  console.log('✅ 使用 JavaScript 版本注册机器人');
+  
   const bot = new RegistrationBot(config);
   currentRegistrationBot = bot;
   
@@ -808,18 +1090,18 @@ ipcMain.handle('batch-register', async (event, config) => {
 // 取消批量注册（跨平台：mac / Windows / Linux）
 ipcMain.handle('cancel-batch-register', async () => {
   try {
-    if (!currentRegistrationBot) {
-      return {
-        success: false,
-        message: '当前没有正在进行的批量注册任务'
-      };
-    }
-
-    await currentRegistrationBot.cancel((log) => {
+    const logCallback = (log) => {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('registration-log', log);
       }
-    });
+    };
+
+    // 使用统一的 BrowserKiller 工具关闭浏览器进程
+    const BrowserKiller = require('./src/registrationBotCancel');
+    await BrowserKiller.cancelBatchRegistration(currentRegistrationBot, logCallback);
+    
+    // 清空当前注册实例
+    currentRegistrationBot = null;
     
     return {
       success: true,
@@ -834,21 +1116,33 @@ ipcMain.handle('cancel-batch-register', async () => {
   }
 });
 
-// 获取当前登录信息
+// 获取当前登录信息（从 vscdb 读取）
 ipcMain.handle('get-current-login', async () => {
   try {
-    const loginFile = path.join(app.getPath('userData'), 'current_login.json');
-    const data = await fs.readFile(loginFile, 'utf-8');
-    return JSON.parse(data);
+    const { AccountSwitcher } = require(path.join(__dirname, 'js', 'accountSwitcher'));
+    const account = await AccountSwitcher.getCurrentAccount();
+    
+    if (account) {
+      return {
+        success: true,
+        email: account.email,
+        name: account.name,
+        apiKey: account.apiKey,
+        planName: account.planName
+      };
+    }
+    
+    return { success: false };
   } catch (error) {
-    return null;
+    console.error('获取当前登录信息失败:', error);
+    return { success: false, error: error.message };
   }
 });
 
 // 测试IMAP连接
 ipcMain.handle('test-imap', async (event, config) => {
   try {
-    const EmailReceiver = require('./src/emailReceiver');
+    const EmailReceiver = require(path.join(__dirname, 'src', 'emailReceiver'));
     const receiver = new EmailReceiver(config);
     return await receiver.testConnection();
   } catch (error) {
@@ -859,19 +1153,19 @@ ipcMain.handle('test-imap', async (event, config) => {
 // ==================== 账号切换 ====================
 
 // 切换账号
-ipcMain.handle('switch-account', async (event, account, skipClose = false) => {
+ipcMain.handle('switch-account', async (event, account) => {
   if (!isOperationAllowed('switch-account')) {
     return { success: false, error: '当前状态下无法执行此操作' };
   }
   try {
-    const { AccountSwitcher } = require('./js/accountSwitcher');
+    const { AccountSwitcher } = require(path.join(__dirname, 'js', 'accountSwitcher'));
     
     const result = await AccountSwitcher.switchAccount(account, (log) => {
       // 发送日志到渲染进程
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('switch-log', log);
       }
-    }, skipClose);
+    });
     
     return result;
   } catch (error) {
@@ -886,7 +1180,7 @@ ipcMain.handle('switch-account', async (event, account, skipClose = false) => {
 // 获取当前 Windsurf 登录的账号
 ipcMain.handle('get-current-windsurf-account', async () => {
   try {
-    const CurrentAccountDetector = require('./js/currentAccountDetector');
+    const CurrentAccountDetector = require(path.join(__dirname, 'js', 'currentAccountDetector'));
     const account = await CurrentAccountDetector.getCurrentAccount();
     return account;
   } catch (error) {
@@ -961,7 +1255,7 @@ ipcMain.handle('load-windsurf-config', async (event) => {
 // 检测 Windsurf 是否正在运行
 ipcMain.handle('check-windsurf-running', async () => {
   try {
-    const { WindsurfPathDetector } = require('./js/accountSwitcher');
+    const { WindsurfPathDetector } = require(path.join(__dirname, 'js', 'accountSwitcher'));
     return await WindsurfPathDetector.isRunning();
   } catch (error) {
     console.error('检测 Windsurf 运行状态失败:', error);
@@ -972,7 +1266,7 @@ ipcMain.handle('check-windsurf-running', async () => {
 // 关闭 Windsurf
 ipcMain.handle('close-windsurf', async () => {
   try {
-    const { WindsurfPathDetector } = require('./js/accountSwitcher');
+    const { WindsurfPathDetector } = require(path.join(__dirname, 'js', 'accountSwitcher'));
     await WindsurfPathDetector.closeWindsurf();
     return { success: true };
   } catch (error) {
@@ -984,8 +1278,22 @@ ipcMain.handle('close-windsurf', async () => {
 // 完整重置Windsurf
 ipcMain.handle('full-reset-windsurf', async (event, customInstallPath = null) => {
   try {
-    const machineIdResetter = require('./src/machineIdResetter');
-    return await machineIdResetter.fullResetWindsurf(customInstallPath);
+    const machineIdResetter = require(path.join(__dirname, 'src', 'machineIdResetter'));
+    
+    // 设置日志回调，将日志转发到渲染进程
+    machineIdResetter.setLogCallback((log) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('reset-log', log);
+      }
+    });
+    
+    // 执行重置
+    const result = await machineIdResetter.fullResetWindsurf(customInstallPath);
+    
+    // 清除日志回调
+    machineIdResetter.setLogCallback(null);
+    
+    return result;
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -994,7 +1302,7 @@ ipcMain.handle('full-reset-windsurf', async (event, customInstallPath = null) =>
 // 检测 Windsurf 安装路径（Windows）
 ipcMain.handle('detect-windsurf-install-path', async () => {
   try {
-    const machineIdResetter = require('./src/machineIdResetter');
+    const machineIdResetter = require(path.join(__dirname, 'src', 'machineIdResetter'));
     const installPath = await machineIdResetter.detectWindsurfInstallPath();
     return { success: true, installPath };
   } catch (error) {
@@ -1152,7 +1460,7 @@ ipcMain.handle('login-and-get-tokens', async (event, account) => {
     console.log(`[登录获取Token] 开始为账号 ${email} 获取 Token...`);
     
     // 使用 AccountLogin 模块
-    const AccountLogin = require('./js/accountLogin');
+    const AccountLogin = require(path.join(__dirname, 'js', 'accountLogin'));
     const loginBot = new AccountLogin();
     
     // 日志回调函数（发送到渲染进程）
@@ -1199,7 +1507,7 @@ ipcMain.handle('login-and-get-tokens', async (event, account) => {
   }
 });
 
-// 获取账号Token（旧方法，保留兼容性）
+// 获取账号Token（统一使用AccountLogin模块）
 ipcMain.handle('get-account-token', async (event, credentials) => {
   try {
     const { email, password } = credentials;
@@ -1211,17 +1519,30 @@ ipcMain.handle('get-account-token', async (event, credentials) => {
     console.log(`开始获取账号 ${email} 的token...`);
     console.log(`当前平台: ${process.platform}`);
     
-    // 使用BrowserTokenExtractor模块
-    const BrowserTokenExtractor = require('./js/browserTokenExtractor');
+    // 使用 AccountLogin 模块（统一的Token获取方案）
+    const AccountLogin = require(path.join(__dirname, 'js', 'accountLogin'));
+    const loginBot = new AccountLogin();
     
-    // 检查浏览器可用性
-    const browserCheck = await BrowserTokenExtractor.checkBrowserAvailability();
-    if (!browserCheck.available) {
-      return { success: false, error: `未检测到可用的浏览器，请安装Chrome: ${browserCheck.error || ''}` };
+    // 日志回调函数
+    const logCallback = (message) => {
+      console.log(`[Token获取] ${message}`);
+    };
+    
+    // 执行登录并获取 Token
+    const result = await loginBot.loginAndGetTokens({ email, password }, logCallback);
+    
+    // 转换返回格式以兼容旧的调用方
+    if (result.success && result.account) {
+      return {
+        success: true,
+        token: result.account.apiKey,
+        email: result.account.email,
+        password: password,
+        username: result.account.name,
+        apiKey: result.account.apiKey,
+        refreshToken: result.account.refreshToken
+      };
     }
-    
-    // 提取token
-    const result = await BrowserTokenExtractor.extractToken(credentials);
     
     return result;
   } catch (error) {

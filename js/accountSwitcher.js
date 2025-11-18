@@ -5,6 +5,8 @@ const { app, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs').promises;
 const { v4: uuidv4 } = require('uuid');
+const crypto = require('crypto');
+const { execSync } = require('child_process');
 
 /**
  * Windsurf 路径检测器
@@ -85,6 +87,36 @@ class WindsurfPathDetector {
   }
   
   /**
+   * 获取 Local State 路径
+   */
+  static getLocalStatePath() {
+    const platform = process.platform;
+    
+    if (platform === 'win32') {
+      return path.join(this.getAppDataDir(), 'Windsurf/Local State');
+    } else if (platform === 'darwin') {
+      return path.join(this.getHomeDir(), 'Library/Application Support/Windsurf/Local State');
+    }
+    
+    throw new Error(`不支持的平台: ${platform}`);
+  }
+  
+  /**
+   * 获取 storage.json 路径
+   */
+  static getStorageJsonPath() {
+    const platform = process.platform;
+    
+    if (platform === 'win32') {
+      return path.join(this.getAppDataDir(), 'Windsurf/User/globalStorage/storage.json');
+    } else if (platform === 'darwin') {
+      return path.join(this.getHomeDir(), 'Library/Application Support/Windsurf/User/globalStorage/storage.json');
+    }
+    
+    throw new Error(`不支持的平台: ${platform}`);
+  }
+  
+  /**
    * 检查 Windsurf 是否已安装
    */
   static async isInstalled() {
@@ -109,51 +141,202 @@ class WindsurfPathDetector {
       console.log('[启动 Windsurf] 开始启动...');
       
       if (process.platform === 'win32') {
-        // Windows: 启动 Windsurf.exe
-        try {
-          // 方法1: 从开始菜单启动
-          await execAsync('start "" "Windsurf"', { shell: 'cmd.exe' });
-          console.log('[启动 Windsurf] Windows: 已从开始菜单启动');
-        } catch (error) {
-          // 方法2: 从常见安装路径启动
-          const commonPaths = [
-            '%LOCALAPPDATA%\\Programs\\Windsurf\\Windsurf.exe',
-            '%PROGRAMFILES%\\Windsurf\\Windsurf.exe',
-            '%PROGRAMFILES(X86)%\\Windsurf\\Windsurf.exe'
-          ];
-          
-          let started = false;
-          for (const exePath of commonPaths) {
-            try {
-              await execAsync(`start "" "${exePath}"`, { shell: 'cmd.exe' });
-              console.log(`[启动 Windsurf] Windows: 已从 ${exePath} 启动`);
-              started = true;
-              break;
-            } catch {
-              // 继续尝试下一个路径
-            }
-          }
-          
-          if (!started) {
-            throw new Error('无法找到 Windsurf 安装路径');
-          }
-        }
-        
+        await this.startWindsurfWindows(execAsync);
       } else if (process.platform === 'darwin') {
-        // macOS: 使用 open 命令启动
-        await execAsync('open -a Windsurf');
-        console.log('[启动 Windsurf] macOS: 已启动');
-        
+        await this.startWindsurfMacOS(execAsync);
       } else {
         throw new Error('不支持的操作系统');
       }
       
-      console.log('[启动 Windsurf] ✅ 启动成功');
+      // 验证启动是否成功（等待最多 10 秒，Windows启动较慢）
+      console.log('[启动 Windsurf] 验证启动状态...');
+      const maxAttempts = process.platform === 'win32' ? 10 : 5;
+      
+      for (let i = 0; i < maxAttempts; i++) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        if (await this.isRunning()) {
+          console.log(`[启动 Windsurf] ✅ 启动成功并已验证 (耗时: ${i + 1}秒)`);
+          return true;
+        }
+        console.log(`[启动 Windsurf] 等待启动... (${i + 1}/${maxAttempts})`);
+      }
+      
+      console.warn('[启动 Windsurf] ⚠️ 无法验证启动状态，但命令已执行');
+      console.warn('[启动 Windsurf] 💡 Windsurf 可能正在后台启动，请稍候');
       return true;
     } catch (error) {
       console.error('[启动 Windsurf] 错误:', error);
       throw error;
     }
+  }
+  
+  /**
+   * Windows: 启动 Windsurf
+   */
+  static async startWindsurfWindows(execAsync) {
+    const os = require('os');
+    const { spawn, execSync } = require('child_process');
+    const homeDir = os.homedir();
+    
+    // 展开环境变量
+    const localAppData = process.env.LOCALAPPDATA || path.join(homeDir, 'AppData', 'Local');
+    
+    // 可能的安装路径（按优先级排序）
+    const possiblePaths = [
+      // 1. 用户本地安装（最常见）
+      path.join(localAppData, 'Programs', 'Windsurf', 'Windsurf.exe')
+    ];
+    
+    // 2. 尝试从正在运行的进程获取路径（最准确）
+    try {
+      const result = execSync('wmic process where "name=\'Windsurf.exe\'" get ExecutablePath', { 
+        encoding: 'utf-8',
+        timeout: 3000
+      });
+      const lines = result.split('\n').filter(line => line.trim() && !line.includes('ExecutablePath'));
+      if (lines.length > 0) {
+        const runningPath = lines[0].trim();
+        if (runningPath && runningPath.endsWith('.exe')) {
+          possiblePaths.unshift(runningPath);
+          console.log(`[启动 Windsurf] Windows: 从运行进程获取路径: ${runningPath}`);
+        }
+      }
+    } catch (error) {
+      // 进程未运行或wmic失败，继续
+    }
+    
+    // 3. 尝试从注册表读取安装路径
+    try {
+      const registryPaths = [
+        'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\Windsurf.exe',
+        'HKEY_CURRENT_USER\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\Windsurf.exe',
+        'HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Windsurf',
+        'HKEY_CURRENT_USER\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Windsurf'
+      ];
+      
+      for (const regPath of registryPaths) {
+        try {
+          // 尝试读取默认值
+          let result = execSync(`reg query "${regPath}" /ve 2>nul`, { encoding: 'utf-8' });
+          let match = result.match(/REG_SZ\s+(.+)/);
+          
+          // 如果默认值不存在，尝试读取InstallLocation
+          if (!match) {
+            result = execSync(`reg query "${regPath}" /v InstallLocation 2>nul`, { encoding: 'utf-8' });
+            match = result.match(/InstallLocation\s+REG_SZ\s+(.+)/);
+            if (match && match[1]) {
+              const installDir = match[1].trim();
+              const exePath = path.join(installDir, 'Windsurf.exe');
+              possiblePaths.unshift(exePath);
+              console.log(`[启动 Windsurf] Windows: 从注册表获取安装目录: ${exePath}`);
+            }
+          } else if (match && match[1]) {
+            const exePath = match[1].trim();
+            possiblePaths.unshift(exePath);
+            console.log(`[启动 Windsurf] Windows: 从注册表获取路径: ${exePath}`);
+          }
+        } catch {
+          // 注册表项不存在，继续
+        }
+      }
+    } catch (error) {
+      console.log('[启动 Windsurf] Windows: 无法读取注册表，使用默认路径');
+    }
+    
+    // 4. 系统级安装 - 使用环境变量（支持任意盘符）
+    if (process.env.PROGRAMFILES) {
+      possiblePaths.push(path.join(process.env.PROGRAMFILES, 'Windsurf', 'Windsurf.exe'));
+    }
+    if (process.env['PROGRAMFILES(X86)']) {
+      possiblePaths.push(path.join(process.env['PROGRAMFILES(X86)'], 'Windsurf', 'Windsurf.exe'));
+    }
+    
+    // 5. 常见盘符的Program Files（C/D/E/F/G盘）
+    const commonDrives = ['C', 'D', 'E', 'F', 'G'];
+    for (const drive of commonDrives) {
+      possiblePaths.push(`${drive}:\\Program Files\\Windsurf\\Windsurf.exe`);
+      possiblePaths.push(`${drive}:\\Program Files (x86)\\Windsurf\\Windsurf.exe`);
+    }
+    
+    // 6. 去重（避免重复检测）
+    const uniquePaths = [...new Set(possiblePaths)];
+    
+    console.log(`[启动 Windsurf] Windows: 开始搜索，共 ${uniquePaths.length} 个可能路径`);
+    
+    // 查找存在的可执行文件
+    let exePath = null;
+    for (const testPath of uniquePaths) {
+      try {
+        await fs.access(testPath);
+        exePath = testPath;
+        console.log(`[启动 Windsurf] Windows: ✅ 找到可执行文件: ${exePath}`);
+        break;
+      } catch {
+        // 文件不存在，继续
+      }
+    }
+    
+    if (!exePath) {
+      console.error('[启动 Windsurf] Windows: ❌ 未找到 Windsurf.exe');
+      console.error('[启动 Windsurf] Windows: 已搜索以下路径:');
+      uniquePaths.forEach(p => console.error(`  - ${p}`));
+      throw new Error('无法找到 Windsurf 安装路径\n请确保 Windsurf 已正确安装');
+    }
+    
+    // 使用 spawn 启动 Windsurf（detached模式，不阻塞）
+    try {
+      const child = spawn(exePath, [], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: false
+      });
+      
+      // 分离子进程，让它独立运行
+      child.unref();
+      
+      console.log('[启动 Windsurf] Windows: 启动命令已执行');
+      console.log(`[启动 Windsurf] Windows: 进程ID: ${child.pid}`);
+    } catch (error) {
+      console.error('[启动 Windsurf] Windows: spawn失败，尝试使用cmd启动');
+      // 降级方案：使用cmd启动
+      const command = `start "" "${exePath}"`;
+      await execAsync(command, { shell: 'cmd.exe' });
+      console.log('[启动 Windsurf] Windows: 使用cmd启动成功');
+    }
+  }
+  
+  /**
+   * macOS: 启动 Windsurf
+   */
+  static async startWindsurfMacOS(execAsync) {
+    const os = require('os');
+    
+    // 可能的应用路径
+    const possiblePaths = [
+      '/Applications/Windsurf.app',
+      path.join(os.homedir(), 'Applications', 'Windsurf.app')
+    ];
+    
+    // 查找存在的应用
+    let appPath = null;
+    for (const testPath of possiblePaths) {
+      try {
+        await fs.access(testPath);
+        appPath = testPath;
+        console.log(`[启动 Windsurf] macOS: 找到应用: ${appPath}`);
+        break;
+      } catch {
+        // 应用不存在，继续
+      }
+    }
+    
+    if (!appPath) {
+      throw new Error('无法找到 Windsurf.app\n请确保 Windsurf 已正确安装在 /Applications 或 ~/Applications');
+    }
+    
+    // 启动 Windsurf
+    await execAsync(`open "${appPath}"`);
+    console.log('[启动 Windsurf] macOS: 启动命令已执行');
   }
   
   /**
@@ -166,27 +349,105 @@ class WindsurfPathDetector {
     
     try {
       if (process.platform === 'win32') {
-        const { stdout } = await execAsync('tasklist /FI "IMAGENAME eq Windsurf.exe"', { shell: 'cmd.exe' });
-        return stdout.toLowerCase().includes('windsurf.exe');
+        return await this.isRunningWindows(execAsync);
       } else if (process.platform === 'darwin') {
-        try {
-          // 使用更宽松的匹配，检测任何 Windsurf 相关进程
-          const { stdout } = await execAsync('pgrep -f "Windsurf"');
-          return stdout.trim().length > 0;
-        } catch {
-          // pgrep 返回非0表示没找到进程
-          return false;
-        }
+        return await this.isRunningMacOS(execAsync);
       } else {
         return false;
       }
-    } catch {
+    } catch (error) {
+      console.error('[检测进程] 意外错误:', error.message);
       return false;
     }
   }
   
   /**
-   * 关闭 Windsurf（优雅关闭 + 强制关闭）- 兼容所有 Windows 和 macOS 版本
+   * Windows: 检测 Windsurf 是否运行
+   */
+  static async isRunningWindows(execAsync) {
+    try {
+      // 检测所有 Windsurf 相关进程
+      // 注意: tasklist 不支持通配符，需要分别检测
+      const processNames = ['Windsurf.exe', 'Windsurf Helper.exe'];
+      
+      for (const processName of processNames) {
+        try {
+          const { stdout } = await execAsync(
+            `tasklist /FI "IMAGENAME eq ${processName}" /NH`, 
+            { shell: 'cmd.exe' }
+          );
+          
+          // 检查输出是否包含进程名（忽略 "INFO: No tasks" 等信息）
+          if (stdout.toLowerCase().includes(processName.toLowerCase())) {
+            console.log(`[检测进程] Windows: 发现进程 ${processName}`);
+            return true;
+          }
+        } catch (error) {
+          // 单个进程检测失败，继续检测下一个
+          continue;
+        }
+      }
+      
+      // 所有进程都未找到
+      return false;
+      
+    } catch (error) {
+      console.error('[检测进程] Windows 检测失败:', error.message);
+      // 检测失败时返回 false（保守策略）
+      return false;
+    }
+  }
+  
+  /**
+   * macOS: 检测 Windsurf 是否运行
+   */
+  static async isRunningMacOS(execAsync) {
+    try {
+      // 方法1: 使用 pgrep 精确匹配主进程
+      try {
+        const { stdout } = await execAsync('pgrep -x "Windsurf"');
+        if (stdout.trim().length > 0) {
+          console.log('[检测进程] macOS: 发现 Windsurf 主进程 (pgrep)');
+          return true;
+        }
+      } catch (error) {
+        // pgrep 返回 1 表示没找到进程（正常）
+        if (error.code === 1) {
+          // 继续尝试其他方法
+        } else {
+          console.warn('[检测进程] macOS: pgrep 执行失败:', error.message);
+        }
+      }
+      
+      // 方法2: 使用 ps 命令检测
+      try {
+        const { stdout } = await execAsync('ps aux | grep -i "Windsurf.app" | grep -v grep');
+        if (stdout.trim().length > 0) {
+          console.log('[检测进程] macOS: 发现 Windsurf 进程 (ps)');
+          return true;
+        }
+      } catch (error) {
+        // grep 没找到匹配会返回非 0，这是正常的
+        if (error.code === 1) {
+          // 没找到进程
+          return false;
+        } else {
+          console.warn('[检测进程] macOS: ps 执行失败:', error.message);
+        }
+      }
+      
+      // 所有方法都未检测到进程
+      return false;
+      
+    } catch (error) {
+      console.error('[检测进程] macOS 检测失败:', error.message);
+      // 检测失败时返回 false（保守策略）
+      return false;
+    }
+  }
+  
+  /**
+   * 关闭 Windsurf（优雅关闭 + 强制关闭）- 改进版
    */
   static async closeWindsurf() {
     const { exec } = require('child_process');
@@ -197,105 +458,170 @@ class WindsurfPathDetector {
       console.log('[关闭 Windsurf] 开始关闭流程...');
       
       if (process.platform === 'win32') {
-        // Windows: 先尝试优雅关闭，再强制关闭
-        console.log('[关闭 Windsurf] Windows: 尝试优雅关闭...');
-        try {
-          await execAsync('taskkill /IM Windsurf.exe 2>nul', { shell: 'cmd.exe' });
-          await new Promise(resolve => setTimeout(resolve, 2000));
-        } catch (error) {
-          // 忽略错误
-        }
-        
-        // 检查是否还在运行
-        if (await this.isRunning()) {
-          console.log('[关闭 Windsurf] Windows: 优雅关闭失败，使用强制关闭...');
-          const commands = [
-            'taskkill /F /T /IM Windsurf.exe 2>nul || exit 0',
-            'taskkill /F /T /IM "Windsurf Helper.exe" 2>nul || exit 0'
-          ];
-          
-          for (const cmd of commands) {
-            try {
-              await execAsync(cmd, { shell: 'cmd.exe' });
-            } catch (error) {
-              // 忽略错误
-            }
-          }
-        }
-        
+        return await this.closeWindsurfWindows(execAsync);
       } else if (process.platform === 'darwin') {
-        // macOS: 先尝试优雅关闭，再强制关闭
-        console.log('[关闭 Windsurf] macOS: 尝试优雅关闭...');
-        
-        // 方法1: 使用 osascript 优雅退出
-        try {
-          await execAsync('osascript -e \'tell application "Windsurf" to quit\' 2>/dev/null');
-          console.log('[关闭 Windsurf] macOS: 已发送退出信号');
-          await new Promise(resolve => setTimeout(resolve, 3000));
-        } catch (error) {
-          console.log('[关闭 Windsurf] macOS: osascript 失败，尝试其他方法');
-        }
-        
-        // 检查是否还在运行
-        if (await this.isRunning()) {
-          console.log('[关闭 Windsurf] macOS: 优雅关闭失败，使用 SIGTERM...');
-          // 方法2: 使用 SIGTERM (15) 信号
-          try {
-            await execAsync('pkill -15 -f "Windsurf.app/Contents/MacOS/Windsurf" 2>/dev/null');
-            await new Promise(resolve => setTimeout(resolve, 2000));
-          } catch (error) {
-            // 忽略错误
-          }
-        }
-        
-        // 最后检查，如果还在运行才使用 SIGKILL
-        if (await this.isRunning()) {
-          console.log('[关闭 Windsurf] macOS: SIGTERM 失败，使用 SIGKILL...');
-          const commands = [
-            'pkill -9 -f "Windsurf.app/Contents/MacOS/Windsurf" 2>/dev/null || true',
-            'pkill -9 -f "Windsurf Helper" 2>/dev/null || true',
-            'killall -9 "Windsurf" 2>/dev/null || true'
-          ];
-          
-          for (const cmd of commands) {
-            try {
-              await execAsync(cmd);
-            } catch (error) {
-              // 忽略错误
-            }
-          }
-        }
+        return await this.closeWindsurfMacOS(execAsync);
       }
       
-      // 等待进程完全关闭
-      console.log('[关闭 Windsurf] 等待进程关闭...');
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
-      // 重试检测（最多3次）
-      const maxRetries = 3;
-      for (let i = 0; i < maxRetries; i++) {
-        const stillRunning = await this.isRunning();
-        if (!stillRunning) {
-          console.log('[关闭 Windsurf] ✅ 确认已关闭');
-          return true;
-        }
-        console.log(`[关闭 Windsurf] 等待中... (${i + 1}/${maxRetries})`);
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
-      
-      // 最后检查一次
-      const stillRunning = await this.isRunning();
-      if (stillRunning) {
-        console.warn('[关闭 Windsurf] ⚠️ 进程可能仍在运行，但继续执行');
-        // 不抛出错误，允许继续
-      }
-      
-      console.log('[关闭 Windsurf] ✅ 关闭流程完成');
-      return true;
+      throw new Error('不支持的操作系统');
     } catch (error) {
       console.error('[关闭 Windsurf] 错误:', error);
       throw error;
     }
+  }
+  
+  /**
+   * Windows: 关闭 Windsurf
+   */
+  static async closeWindsurfWindows(execAsync) {
+    console.log('[关闭 Windsurf] Windows: 开始关闭...');
+    
+    // 步骤 1: 优雅关闭（带子进程树）
+    console.log('[关闭 Windsurf] Windows: 尝试优雅关闭...');
+    try {
+      await execAsync('taskkill /IM Windsurf.exe /T 2>nul', { shell: 'cmd.exe' });
+      console.log('[关闭 Windsurf] Windows: 已发送关闭信号');
+    } catch (error) {
+      console.log('[关闭 Windsurf] Windows: 优雅关闭命令执行失败（进程可能不存在）');
+    }
+    
+    // 等待进程关闭（最多 5 秒）
+    for (let i = 0; i < 5; i++) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      if (!await this.isRunning()) {
+        console.log('[关闭 Windsurf] Windows: ✅ 优雅关闭成功');
+        return { success: true, method: 'graceful' };
+      }
+      console.log(`[关闭 Windsurf] Windows: 等待关闭... (${i + 1}/5)`);
+    }
+    
+    // 步骤 2: 强制关闭所有相关进程
+    console.log('[关闭 Windsurf] Windows: 优雅关闭超时，使用强制关闭...');
+    const processNames = ['Windsurf.exe', 'Windsurf Helper.exe', 'Windsurf GPU.exe'];
+    
+    for (const processName of processNames) {
+      try {
+        await execAsync(`taskkill /F /T /IM "${processName}" 2>nul`, { shell: 'cmd.exe' });
+        console.log(`[关闭 Windsurf] Windows: 已强制关闭 ${processName}`);
+      } catch (error) {
+        // 进程可能不存在，忽略
+      }
+    }
+    
+    // 最终验证（增加重试次数和等待时间）
+    console.log('[关闭 Windsurf] Windows: 验证进程是否已关闭...');
+    let stillRunning = false;
+    
+    // 多次检测，避免误判（最多检测 3 次，每次间隔 1.5 秒）
+    for (let i = 0; i < 3; i++) {
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      stillRunning = await this.isRunning();
+      
+      if (!stillRunning) {
+        console.log('[关闭 Windsurf] Windows: ✅ 所有进程已关闭');
+        return { success: true, method: 'force' };
+      }
+      
+      console.log(`[关闭 Windsurf] Windows: 进程仍在运行，重试检测... (${i + 1}/3)`);
+    }
+    
+    // 如果仍在运行，返回警告而不是抛出错误
+    if (stillRunning) {
+      console.warn('[关闭 Windsurf] Windows: ⚠️ 部分进程可能仍在运行');
+      return { 
+        success: false, 
+        warning: true,
+        message: '部分 Windsurf 进程可能仍在运行，建议手动关闭后重试'
+      };
+    }
+    
+    console.log('[关闭 Windsurf] Windows: ✅ 所有进程已关闭');
+    return { success: true, method: 'force' };
+  }
+  
+  /**
+   * macOS: 关闭 Windsurf
+   */
+  static async closeWindsurfMacOS(execAsync) {
+    console.log('[关闭 Windsurf] macOS: 开始关闭...');
+    
+    // 步骤 1: 使用 osascript 优雅退出
+    console.log('[关闭 Windsurf] macOS: 尝试使用 AppleScript 退出...');
+    try {
+      await execAsync('osascript -e \'tell application "Windsurf" to quit\' 2>/dev/null');
+      console.log('[关闭 Windsurf] macOS: 已发送退出信号');
+    } catch (error) {
+      console.log('[关闭 Windsurf] macOS: AppleScript 失败，尝试其他方法');
+    }
+    
+    // 等待进程关闭（最多 5 秒）
+    for (let i = 0; i < 5; i++) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      if (!await this.isRunning()) {
+        console.log('[关闭 Windsurf] macOS: ✅ 优雅关闭成功');
+        return { success: true, method: 'graceful' };
+      }
+      console.log(`[关闭 Windsurf] macOS: 等待关闭... (${i + 1}/5)`);
+    }
+    
+    // 步骤 2: 使用 SIGTERM (15) 信号
+    console.log('[关闭 Windsurf] macOS: 优雅关闭超时，发送 SIGTERM...');
+    try {
+      await execAsync('pkill -15 -f "Windsurf.app/Contents/MacOS/Windsurf" 2>/dev/null');
+      console.log('[关闭 Windsurf] macOS: 已发送 SIGTERM 信号');
+    } catch (error) {
+      console.log('[关闭 Windsurf] macOS: SIGTERM 发送失败');
+    }
+    
+    // 等待 SIGTERM 生效（最多 3 秒）
+    for (let i = 0; i < 3; i++) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      if (!await this.isRunning()) {
+        console.log('[关闭 Windsurf] macOS: ✅ SIGTERM 关闭成功');
+        return { success: true, method: 'sigterm' };
+      }
+      console.log(`[关闭 Windsurf] macOS: 等待 SIGTERM 生效... (${i + 1}/3)`);
+    }
+    
+    // 步骤 3: 最后使用 SIGKILL (9) 强制关闭
+    console.log('[关闭 Windsurf] macOS: SIGTERM 超时，使用 SIGKILL 强制关闭...');
+    try {
+      await execAsync('pkill -9 -f "Windsurf.app/Contents/MacOS/Windsurf" 2>/dev/null');
+      await execAsync('pkill -9 -f "Windsurf Helper" 2>/dev/null');
+      console.log('[关闭 Windsurf] macOS: 已发送 SIGKILL 信号');
+    } catch (error) {
+      console.log('[关闭 Windsurf] macOS: SIGKILL 发送失败');
+    }
+    
+    // 最终验证（增加重试次数和等待时间）
+    console.log('[关闭 Windsurf] macOS: 验证进程是否已关闭...');
+    let stillRunning = false;
+    
+    // 多次检测，避免误判（最多检测 3 次，每次间隔 1.5 秒）
+    for (let i = 0; i < 3; i++) {
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      stillRunning = await this.isRunning();
+      
+      if (!stillRunning) {
+        console.log('[关闭 Windsurf] macOS: ✅ 所有进程已关闭');
+        return { success: true, method: 'sigkill' };
+      }
+      
+      console.log(`[关闭 Windsurf] macOS: 进程仍在运行，重试检测... (${i + 1}/3)`);
+    }
+    
+    // 如果仍在运行，返回警告而不是抛出错误
+    if (stillRunning) {
+      console.warn('[关闭 Windsurf] macOS: ⚠️ 部分进程可能仍在运行');
+      return { 
+        success: false, 
+        warning: true,
+        message: '部分 Windsurf 进程可能仍在运行，建议手动关闭后重试'
+      };
+    }
+    
+    console.log('[关闭 Windsurf] macOS: ✅ 所有进程已关闭');
+    return { success: true, method: 'sigkill' };
   }
 }
 
@@ -304,9 +630,9 @@ class WindsurfPathDetector {
  */
 class AccountSwitcher {
   /**
-   * 使用 refresh_token 获取 access_token（通过 Cloudflare Workers 中转）
+   * 使用 refresh_token 获取 Firebase tokens（通过 Cloudflare Workers 中转）
    */
-  static async getAccessToken(refreshToken) {
+  static async getFirebaseTokens(refreshToken) {
     const axios = require('axios');
     const FIREBASE_API_KEY = 'AIzaSyDsOl-1XpT5err0Tcnx8FFod1H8gVGIycY';
     
@@ -329,7 +655,13 @@ class AccountSwitcher {
         }
       );
       
-      return response.data.id_token;
+      // 返回完整的 Firebase tokens
+      return {
+        idToken: response.data.id_token,
+        accessToken: response.data.access_token || response.data.id_token,
+        refreshToken: response.data.refresh_token || refreshToken,
+        expiresIn: parseInt(response.data.expires_in || 3600)
+      };
     } catch (error) {
       // 打印详细错误信息
       if (error.response) {
@@ -367,25 +699,137 @@ class AccountSwitcher {
   }
   
   /**
-   * 加密 sessions 数据
+   * 跨平台加密 sessions 数据 - 使用 Electron safeStorage API
    */
-  static encryptSessions(sessionsData) {
-    // 设置 userData 路径与 Windsurf 一致，确保加密同源
-    const windsurfUserData = WindsurfPathDetector.getUserDataPath();
-    const originalUserData = app.getPath('userData');
+  static async encryptSessions(sessionsData) {
+    const jsonString = JSON.stringify(sessionsData);
     
     try {
-      // 临时设置为 Windsurf 的 userData (关键：确保加密同源)
-      app.setPath('userData', windsurfUserData);
+      // 检查 safeStorage 是否可用
+      if (typeof safeStorage === 'undefined' || !safeStorage.isEncryptionAvailable()) {
+        throw new Error('Electron safeStorage 不可用');
+      }
       
-      const jsonString = JSON.stringify(sessionsData);
-      const encrypted = safeStorage.encryptString(jsonString);
+      console.log('[加密] 使用 Electron safeStorage API 加密...');
+      const encryptedBuffer = safeStorage.encryptString(jsonString);
       
-      console.log('[加密] ✅ 加密成功，userData:', windsurfUserData);
-      return encrypted;
-    } finally {
-      // 恢复原始 userData
-      app.setPath('userData', originalUserData);
+      console.log('[加密] ✅ 加密成功，Buffer 长度:', encryptedBuffer.length);
+      console.log('[加密] 格式: Electron safeStorage 原生格式');
+      
+      return encryptedBuffer;
+    } catch (error) {
+      console.error('[加密] ❌ 加密失败:', error);
+      throw error;
+    }
+  }
+  
+  /**
+   * 验证加密是否可用
+   */
+  static isEncryptionAvailable() {
+    try {
+      return typeof safeStorage !== 'undefined' && safeStorage.isEncryptionAvailable();
+    } catch (error) {
+      console.error('[加密] 检查加密可用性失败:', error);
+      return false;
+    }
+  }
+  
+  /**
+   * Windows: 验证 Local State 文件是否存在
+   */
+  static checkLocalStateForWindows() {
+    if (process.platform !== 'win32') {
+      return { success: true, message: '非Windows平台，无需检查' };
+    }
+    
+    try {
+      const { app } = require('electron');
+      const toolUserData = app.getPath('userData');
+      const toolLocalState = path.join(toolUserData, 'Local State');
+      
+      const fs = require('fs');
+      if (!fs.existsSync(toolLocalState)) {
+        return {
+          success: false,
+          message: 'Local State 文件不存在',
+          suggestion: '请确保 Windsurf 已安装并至少运行过一次'
+        };
+      }
+      
+      // 检查文件内容
+      const localState = JSON.parse(fs.readFileSync(toolLocalState, 'utf-8'));
+      if (!localState.os_crypt || !localState.os_crypt.encrypted_key) {
+        return {
+          success: false,
+          message: 'Local State 文件格式不正确',
+          suggestion: '请重新安装 Windsurf 或联系技术支持'
+        };
+      }
+      
+      return {
+        success: true,
+        message: 'Local State 文件正常',
+        encryptedKeyLength: localState.os_crypt.encrypted_key.length
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: `检查失败: ${error.message}`,
+        suggestion: '请确保有足够的文件访问权限'
+      };
+    }
+  }
+  
+  /**
+   * 解密 sessions 数据 - 使用 Electron safeStorage API（用于测试）
+   */
+  static async decryptSessions(encryptedBuffer) {
+    try {
+      if (typeof safeStorage === 'undefined' || !safeStorage.isEncryptionAvailable()) {
+        throw new Error('Electron safeStorage 不可用');
+      }
+      
+      console.log('[解密] 使用 Electron safeStorage API 解密...');
+      const decryptedString = safeStorage.decryptString(encryptedBuffer);
+      
+      console.log('[解密] ✅ 解密成功');
+      return JSON.parse(decryptedString);
+    } catch (error) {
+      console.error('[解密] ❌ 解密失败:', error);
+      throw error;
+    }
+  }
+  
+  /**
+   * 测试加密解密是否正常工作
+   */
+  static async testEncryption() {
+    try {
+      console.log('[测试] 开始加密解密测试...');
+      
+      const testData = [{
+        id: 'test-session',
+        accessToken: 'test-token',
+        account: { id: 'test-id', label: 'test@example.com' }
+      }];
+      
+      // 加密
+      const encrypted = await this.encryptSessions(testData);
+      console.log('[测试] 加密成功，长度:', encrypted.length);
+      
+      // 解密
+      const decrypted = await this.decryptSessions(encrypted);
+      console.log('[测试] 解密成功');
+      
+      // 验证
+      const match = JSON.stringify(testData) === JSON.stringify(decrypted);
+      console.log('[测试] 数据匹配:', match ? '✅' : '❌');
+      
+      return match;
+    } catch (error) {
+      console.error('[测试] 测试失败:', error);
+      return false;
     }
   }
   
@@ -469,33 +913,110 @@ class AccountSwitcher {
   }
   
   /**
-   * 重置机器 ID
+   * 生成标准的机器 ID
+   */
+  static generateMachineIds() {
+    return {
+      machineId: crypto.createHash('sha256').update(crypto.randomBytes(32)).digest('hex'),
+      macMachineId: crypto.createHash('sha512').update(crypto.randomBytes(64)).digest('hex'),
+      sqmId: `{${uuidv4().toUpperCase()}}`,
+      devDeviceId: uuidv4(),
+      serviceMachineId: uuidv4()
+    };
+  }
+  
+  /**
+   * 重置机器 ID (跨平台)
    */
   static async resetMachineId() {
-    const { v4: uuidv4 } = require('uuid');
-    const crypto = require('crypto');
-    const storageJsonPath = path.join(process.env.HOME, 'Library/Application Support/Windsurf/User/globalStorage/storage.json');
+    const platform = process.platform;
+    const storageJsonPath = WindsurfPathDetector.getStorageJsonPath();
     
     try {
       // 生成新的机器 ID
-      const newMachineId = crypto.createHash('sha256').update(uuidv4()).digest('hex');
-      const newSqmId = `{${uuidv4()}}`;
-      const newDevDeviceId = uuidv4();
+      const ids = this.generateMachineIds();
       
-      // 读取 storage.json
-      const storageData = JSON.parse(await fs.readFile(storageJsonPath, 'utf-8'));
+      // 读取 storage.json，如果不存在则创建
+      let storageData = {};
+      try {
+        const content = await fs.readFile(storageJsonPath, 'utf-8');
+        storageData = JSON.parse(content);
+      } catch (error) {
+        console.warn('[机器码] storage.json 不存在或格式错误，创建新文件');
+        storageData = {};
+      }
       
-      // 更新机器 ID
-      storageData.machineId = newMachineId;
-      storageData.sqmId = newSqmId;
-      storageData.devDeviceId = newDevDeviceId;
+      // 更新机器 ID 字段
+      storageData['telemetry.machineId'] = ids.machineId;
+      storageData['telemetry.sqmId'] = ids.sqmId;
+      storageData['telemetry.devDeviceId'] = ids.devDeviceId;
       
-      // 写回文件
+      // macOS 特有字段
+      if (platform === 'darwin') {
+        storageData['telemetry.macMachineId'] = ids.macMachineId;
+      }
+      
+      // 写回 storage.json
       await fs.writeFile(storageJsonPath, JSON.stringify(storageData, null, 2));
+      console.log('[机器码] ✅ storage.json 已更新');
       
-      return { newMachineId, newSqmId, newDevDeviceId };
+      // Windows: 重置注册表
+      if (platform === 'win32') {
+        const registryResult = await this.resetWindowsRegistry();
+        if (!registryResult) {
+          console.warn('[机器码] ⚠️ Windows 注册表未重置（需要管理员权限）');
+          console.warn('[机器码] 💡 这不影响切号，storage.json 的机器ID已成功重置');
+          ids.registryResetFailed = true;
+        } else {
+          ids.registryGuid = registryResult;
+          ids.registryResetFailed = false;
+        }
+      }
+      
+      return ids;
     } catch (error) {
       throw new Error(`重置机器 ID 失败: ${error.message}`);
+    }
+  }
+  
+  /**
+   * Windows: 重置注册表 MachineGuid
+   */
+  static async resetWindowsRegistry() {
+    try {
+      const newGuid = uuidv4();
+      const registryPath = 'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography';
+      
+      // 尝试修改注册表
+      const command = `reg add "${registryPath}" /v MachineGuid /t REG_SZ /d "${newGuid}" /f`;
+      execSync(command, { encoding: 'utf-8' });
+      
+      // 验证是否修改成功
+      try {
+        const verifyCommand = `reg query "${registryPath}" /v MachineGuid`;
+        const output = execSync(verifyCommand, { encoding: 'utf-8' });
+        
+        if (output.includes(newGuid)) {
+          console.log('[注册表] ✅ Windows 注册表 MachineGuid 已重置并验证');
+          return newGuid;
+        } else {
+          console.warn('[注册表] ⚠️ 注册表修改后验证失败');
+          return null;
+        }
+      } catch (verifyError) {
+        console.warn('[注册表] ⚠️ 无法验证注册表修改');
+        return newGuid; // 假设成功
+      }
+      
+    } catch (error) {
+      // 检查是否是权限问题
+      if (error.message.includes('Access is denied') || error.message.includes('拒绝访问')) {
+        console.warn('[注册表] ⚠️ 重置注册表失败: 需要管理员权限');
+        console.warn('[注册表] 💡 这不影响切号，storage.json 的机器ID已成功重置');
+      } else {
+        console.warn('[注册表] ⚠️ 重置注册表失败:', error.message);
+      }
+      return null;
     }
   }
   
@@ -503,9 +1024,8 @@ class AccountSwitcher {
    * 切换账号（主函数）
    * @param {Object} account - 账号信息
    * @param {Function} logCallback - 日志回调函数
-   * @param {Boolean} skipClose - 是否跳过关闭 Windsurf（直接写入）
    */
-  static async switchAccount(account, logCallback = null, skipClose = false) {
+  static async switchAccount(account, logCallback = null) {
     const log = (msg) => {
       console.log(msg);
       if (logCallback) logCallback(msg);
@@ -515,50 +1035,87 @@ class AccountSwitcher {
       log('[切号] ========== 开始切换账号 ==========');
       log(`[切号] 目标账号: ${account.email}`);
       
-      // ========== 步骤 1: 检查并关闭 Windsurf ==========
-      if (skipClose) {
-        log('[切号] ========== 步骤 1: 跳过关闭 Windsurf（直接写入模式）==========');
-        log('[切号] ⚠️  将在 Windsurf 运行时直接写入数据');
-      } else {
-        log('[切号] ========== 步骤 1: 检查并关闭 Windsurf ==========');
-        
-        const isInstalled = await WindsurfPathDetector.isInstalled();
-        if (!isInstalled) {
-          throw new Error('未检测到 Windsurf，请确保已安装');
-        }
-        log('[切号] ✅ Windsurf 已安装');
-        
-        const isRunning = await WindsurfPathDetector.isRunning();
-        if (isRunning) {
-          log('[切号] 正在关闭 Windsurf...');
-          await WindsurfPathDetector.closeWindsurf();
-          
-          // 等待进程完全关闭
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          
-          const stillRunning = await WindsurfPathDetector.isRunning();
-          if (stillRunning) {
-            throw new Error('Windsurf 进程未能关闭，请手动关闭后重试');
-          }
-          log('[切号] ✅ Windsurf 已关闭');
+      // Windows: 检查加密环境
+      if (process.platform === 'win32') {
+        // 检查 Local State 文件（加密必需）
+        const localStateCheck = this.checkLocalStateForWindows();
+        if (!localStateCheck.success) {
+          log('[切号] ❌ Local State 检查失败');
+          log(`[切号]    错误: ${localStateCheck.message}`);
+          log(`[切号]    建议: ${localStateCheck.suggestion}`);
+          throw new Error(`Windows 加密环境异常: ${localStateCheck.message}\n${localStateCheck.suggestion}`);
         } else {
-          log('[切号] ✅ Windsurf 未运行');
+          log('[切号] ✅ Local State 文件检查通过');
+          log(`[切号]    加密密钥长度: ${localStateCheck.encryptedKeyLength} 字符`);
         }
+      }
+      
+      // ========== 步骤 1: 检查并关闭 Windsurf ==========
+      log('[切号] ========== 步骤 1: 检查并关闭 Windsurf ==========');
+      
+      const isInstalled = await WindsurfPathDetector.isInstalled();
+      if (!isInstalled) {
+        throw new Error('未检测到 Windsurf，请确保已安装');
+      }
+      log('[切号] ✅ Windsurf 已安装');
+      
+      const isRunning = await WindsurfPathDetector.isRunning();
+      if (isRunning) {
+        log('[切号] 检测到 Windsurf 正在运行');
+        log('[切号] ⚠️  必须关闭 Windsurf 才能安全切换账号');
+        log('[切号] 正在关闭 Windsurf...');
+        
+        const closeResult = await WindsurfPathDetector.closeWindsurf();
+        
+        // 检查关闭结果
+        if (closeResult.success) {
+          log(`[切号] ✅ Windsurf 已关闭 (方式: ${closeResult.method})`);
+        } else if (closeResult.warning) {
+          // 关闭可能失败，但允许用户选择继续
+          log(`[切号] ⚠️ ${closeResult.message}`);
+          log('[切号] ⚠️ 建议：请手动关闭所有 Windsurf 窗口后重试');
+          log('[切号] 💡 如果确认已关闭，可以忽略此警告继续');
+          
+          // 再次检测，给用户一个确认的机会
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          const stillRunning = await WindsurfPathDetector.isRunning();
+          
+          if (stillRunning) {
+            throw new Error('检测到 Windsurf 进程仍在运行\n请手动关闭所有 Windsurf 窗口后重试');
+          } else {
+            log('[切号] ✅ 二次检测：Windsurf 已关闭');
+          }
+        }
+      } else {
+        log('[切号] ✅ Windsurf 未运行，无需关闭');
       }
       
       // ========== 步骤 2: 重置机器 ID ==========
       log('[切号] ========== 步骤 2: 重置机器 ID ==========');
       
-      const { newMachineId, newSqmId, newDevDeviceId } = await this.resetMachineId();
+      const ids = await this.resetMachineId();
       log(`[切号] ✅ 机器 ID 已重置`);
-      log(`[切号]    machineId: ${newMachineId.substring(0, 16)}...`);
-      log(`[切号]    sqmId: ${newSqmId}`);
-      log(`[切号]    devDeviceId: ${newDevDeviceId}`);
+      log(`[切号]    machineId: ${ids.machineId.substring(0, 16)}...`);
+      log(`[切号]    sqmId: ${ids.sqmId}`);
+      log(`[切号]    devDeviceId: ${ids.devDeviceId}`);
+      if (ids.macMachineId) {
+        log(`[切号]    macMachineId: ${ids.macMachineId.substring(0, 16)}...`);
+      }
+      
+      // Windows 注册表状态
+      if (process.platform === 'win32') {
+        if (ids.registryResetFailed) {
+          log('[切号] ⚠️  Windows 注册表未能重置（需要管理员权限）');
+          log('[切号] 💡 这不影响切号，storage.json 的机器ID已成功重置');
+        } else if (ids.registryGuid) {
+          log(`[切号]    ✅ 注册表 GUID: ${ids.registryGuid}`);
+        }
+      }
       
       // ========== 步骤 3: 获取账号凭证 ==========
       log('[切号] ========== 步骤 3: 获取账号凭证 ==========');
       
-      let apiKey, name, apiServerUrl;
+      let apiKey, name, apiServerUrl, firebaseToken;
       
       // 优先使用账号文件中已有的数据
       if (account.apiKey && account.name && account.apiServerUrl) {
@@ -566,9 +1123,58 @@ class AccountSwitcher {
         apiKey = account.apiKey;
         name = account.name;
         apiServerUrl = account.apiServerUrl;
+        
+        // 检查 idToken 是否存在且未过期
+        const now = Date.now();
+        const tokenExpired = account.idTokenExpiresAt && now >= account.idTokenExpiresAt;
+        
+        if (account.idToken && !tokenExpired) {
+          log('[切号] 使用已保存的 Firebase idToken');
+          firebaseToken = account.idToken;
+        } else if (account.refreshToken) {
+          // idToken 不存在或已过期，使用 refreshToken 获取新的
+          if (tokenExpired) {
+            log('[切号] idToken 已过期，正在刷新...');
+          } else {
+            log('[切号] 正在获取 Firebase token...');
+          }
+          
+          try {
+            const tokens = await this.getFirebaseTokens(account.refreshToken);
+            firebaseToken = tokens.idToken;
+            log('[切号] ✅ 获取 Firebase token 成功');
+            
+            // 更新账号文件中的 idToken 和过期时间
+            try {
+              const { app } = require('electron');
+              const accountsFilePath = path.join(app.getPath('userData'), 'accounts.json');
+              const accountsData = await fs.readFile(accountsFilePath, 'utf-8');
+              const accounts = JSON.parse(accountsData);
+              
+              const accountIndex = accounts.findIndex(acc => acc.id === account.id || acc.email === account.email);
+              if (accountIndex !== -1) {
+                accounts[accountIndex].idToken = tokens.idToken;
+                accounts[accountIndex].idTokenExpiresAt = now + (tokens.expiresIn * 1000);
+                accounts[accountIndex].refreshToken = tokens.refreshToken;
+                accounts[accountIndex].updatedAt = new Date().toISOString();
+                
+                await fs.writeFile(accountsFilePath, JSON.stringify(accounts, null, 2), { encoding: 'utf-8' });
+                log('[切号] ✅ 已更新 idToken 到账号文件');
+              }
+            } catch (updateError) {
+              log(`[切号] ⚠️ 更新账号文件失败: ${updateError.message}`);
+            }
+          } catch (e) {
+            throw new Error(`获取 Firebase token 失败: ${e.message}\n请检查 refreshToken 是否有效`);
+          }
+        } else {
+          throw new Error('账号缺少 idToken 和 refreshToken，无法切换\n请重新登录获取 Token');
+        }
+        
         log(`[切号] ✅ 使用已有数据`);
         log(`[切号]    用户名: ${name}`);
         log(`[切号]    API Key: ${apiKey.substring(0, 20)}...`);
+        log(`[切号]    Firebase Token: ${firebaseToken.substring(0, 20)}...`);
         log(`[切号]    Server URL: ${apiServerUrl}`);
       } else {
         // 如果账号文件中没有，则通过 API 获取
@@ -577,18 +1183,20 @@ class AccountSwitcher {
         }
         
         log('[切号] 账号文件中缺少凭证数据，通过 API 获取...');
-        log('[切号] 正在获取 access_token...');
-        const accessToken = await this.getAccessToken(account.refreshToken);
-        log('[切号] ✅ 获取 access_token 成功');
+        log('[切号] 正在获取 Firebase tokens...');
+        const tokens = await this.getFirebaseTokens(account.refreshToken);
+        firebaseToken = tokens.idToken;
+        log('[切号] ✅ 获取 Firebase tokens 成功');
         
         log('[切号] 正在获取 api_key...');
-        const apiKeyInfo = await this.getApiKey(accessToken);
+        const apiKeyInfo = await this.getApiKey(tokens.accessToken);
         apiKey = apiKeyInfo.apiKey;
         name = apiKeyInfo.name;
         apiServerUrl = apiKeyInfo.apiServerUrl;
         log('[切号] ✅ 获取 api_key 成功');
         log(`[切号]    用户名: ${name}`);
         log(`[切号]    API Key: ${apiKey.substring(0, 20)}...`);
+        log(`[切号]    Firebase Token: ${firebaseToken.substring(0, 20)}...`);
         log(`[切号]    Server URL: ${apiServerUrl}`);
         
         // 保存到账号文件，以便下次直接使用
@@ -606,11 +1214,14 @@ class AccountSwitcher {
           
           const accountIndex = accounts.findIndex(acc => acc.id === account.id || acc.email === account.email);
           if (accountIndex !== -1) {
+            const now = Date.now();
             accounts[accountIndex] = {
               ...accounts[accountIndex],
               apiKey,
               name,
               apiServerUrl,
+              idToken: firebaseToken,
+              idTokenExpiresAt: now + (3600 * 1000),  // 1小时后过期
               updatedAt: new Date().toISOString()
             };
             await fs.writeFile(accountsFilePath, JSON.stringify(accounts, null, 2), { encoding: 'utf-8' });
@@ -621,78 +1232,71 @@ class AccountSwitcher {
         }
       }
       
-      // ========== 步骤 4: 重置机器码 ==========
-      log('[切号] ========== 步骤 4: 重置机器码 ==========');
+      // ========== 步骤 4: 写入数据库 ==========
+      log('[切号] ========== 步骤 4: 写入数据库 ==========');
       
-      // 4.1 关闭 Windsurf 并重置机器码
-      log('[切号] 正在关闭 Windsurf 并重置机器码...');
-      const { fullResetWindsurf } = require('../src/machineIdResetter');
-      
-      try {
-        const resetResult = await fullResetWindsurf();
-        if (resetResult.success) {
-          log('[切号] ✅ 机器码重置成功');
-          log(`[切号]    主机器ID: ${resetResult.machineIds.mainMachineId}`);
-          log(`[切号]    遥测ID: ${resetResult.machineIds.telemetryMachineId.substring(0, 16)}...`);
-          log(`[切号]    SQM ID: ${resetResult.machineIds.sqmId}`);
-          log(`[切号]    开发设备ID: ${resetResult.machineIds.devDeviceId}`);
-          log(`[切号]    服务ID: ${resetResult.machineIds.serviceMachineId}`);
-        } else {
-          log(`[切号] ⚠️ 机器码重置失败: ${resetResult.error}`);
-          log('[切号] 继续执行账号切换...');
-        }
-      } catch (error) {
-        log(`[切号] ⚠️ 机器码重置出错: ${error.message}`);
-        log('[切号] 继续执行账号切换...');
-      }
-      
-      // 等待一下确保文件系统操作完成
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      // ========== 步骤 5: 写入数据库 ==========
-      log('[切号] ========== 步骤 5: 写入数据库 ==========');
-      
-      // 5.1 删除旧账号数据
-      log('[切号] 清理旧账号数据...');
+      // 4.1 完全清除所有登录数据（包括浏览器登录）
+      log('[切号] 清理所有旧登录数据...');
       const initSqlJs = require('sql.js');
       const dbPath = WindsurfPathDetector.getDBPath();
       let dbBuffer = await fs.readFile(dbPath);
       let SQL = await initSqlJs();
       let db = new SQL.Database(dbBuffer);
       
+      let deletedCount = 0;
+      
+      // 1. 删除所有 windsurf_auth 相关的 key（工具写入的）
       const oldKeysResult = db.exec(`SELECT key FROM ItemTable WHERE key LIKE 'windsurf_auth-%'`);
       if (oldKeysResult.length > 0 && oldKeysResult[0].values.length > 0) {
         for (const row of oldKeysResult[0].values) {
           db.run('DELETE FROM ItemTable WHERE key = ?', [row[0]]);
+          deletedCount++;
         }
-        const data = db.export();
-        await fs.writeFile(dbPath, data);
-        log(`[切号] ✅ 已删除 ${oldKeysResult[0].values.length} 个旧账号 key`);
       }
+      
+      // 2. 删除所有 secret:// 开头的 sessions（包括浏览器登录的）
+      const secretKeysResult = db.exec(`SELECT key FROM ItemTable WHERE key LIKE 'secret://%'`);
+      if (secretKeysResult.length > 0 && secretKeysResult[0].values.length > 0) {
+        for (const row of secretKeysResult[0].values) {
+          db.run('DELETE FROM ItemTable WHERE key = ?', [row[0]]);
+          deletedCount++;
+          log(`[切号] 删除: ${row[0]}`);
+        }
+      }
+      
+      // 3. 删除 windsurfAuthStatus（旧的登录状态）
+      db.run('DELETE FROM ItemTable WHERE key = ?', ['windsurfAuthStatus']);
+      deletedCount++;
+      
+      log(`[切号] ✅ 已删除 ${deletedCount} 个旧登录数据项`);
+      
+      // 保存更改
+      const data = db.export();
+      await fs.writeFile(dbPath, data);
       db.close();
       
-      // 5.2 构建 sessions 数据（直接创建新的，不需要解密修改）
+      // 4.2 构建 sessions 数据（使用 Firebase token）
       log('[切号] 构建 sessions 数据...');
-      const sessionsKey = 'secret://{"extensionId":"codeium.windsurf","key":"windsurf_auth.sessions"}';
       
+      const sessionsKey = 'secret://{"extensionId":"codeium.windsurf","key":"windsurf_auth.sessions"}';
       const sessionId = uuidv4();
       const sessionsData = [{
         id: sessionId,
-        accessToken: apiKey,
+        accessToken: apiKey,  // ✅ 使用 API Key，不是 Firebase token
         account: { label: name, id: name },
         scopes: []
       }];
       
       log('[切号] Sessions 数据结构:');
       log(`[切号]    id: ${sessionId}`);
-      log(`[切号]    accessToken: ${apiKey}`);
+      log(`[切号]    accessToken (API Key): ${apiKey.substring(0, 20)}...`);
       log(`[切号]    account.label: ${name}`);
       log(`[切号]    account.id: ${name}`);
       log(`[切号]    scopes: []`);
       
       // 加密 sessions 数据
       log('[切号] 加密 sessions 数据...');
-      const encrypted = this.encryptSessions(sessionsData);
+      const encrypted = await this.encryptSessions(sessionsData);
       
       // 验证加密结果
       if (!encrypted || !Buffer.isBuffer(encrypted)) {
@@ -703,194 +1307,61 @@ class AccountSwitcher {
       }
       
       log(`[切号] 加密后 Buffer 长度: ${encrypted.length} 字节`);
+      log(`[切号] 版本标识: ${encrypted.slice(0, 3).toString('utf-8')}`);
       log(`[切号] 前 20 字节: [${Array.from(encrypted.slice(0, 20)).join(', ')}]`);
       
-      // 5.3 写入所有必需数据
-      log('[切号] 写入账号数据...');
-      log(`[切号] 写入 key: ${sessionsKey}`);
-      await this.writeToDB(sessionsKey, encrypted);
-      
-      // 立即验证写入
-      const verifySessionsBuffer = await fs.readFile(dbPath);
-      const verifySessionsSQL = await initSqlJs();
-      const verifySessionsDb = new verifySessionsSQL.Database(verifySessionsBuffer);
-      const verifySessionsResult1 = verifySessionsDb.exec('SELECT value FROM ItemTable WHERE key = ?', [sessionsKey]);
-      verifySessionsDb.close();
-      
-      if (verifySessionsResult1.length > 0 && verifySessionsResult1[0].values.length > 0) {
-        log('[切号] ✅ Sessions 写入成功并已验证');
-      } else {
-        throw new Error('Sessions 写入后验证失败：数据库中未找到数据');
+      // 验证加密数据可以被解密（确保格式正确）
+      try {
+        const testDecrypt = await this.decryptSessions(encrypted);
+        log('[切号] ✅ 加密数据验证成功（可正常解密）');
+      } catch (e) {
+        throw new Error(`加密数据验证失败：${e.message}\n这可能导致 Windsurf 无法识别登录状态`);
       }
       
+      // 4.3 写入所有必需数据
+      log('[切号] 写入账号数据...');
+      
+      // 写入 sessions
+      log(`[切号] 写入 sessions: ${sessionsKey}`);
+      await this.writeToDB(sessionsKey, encrypted);
+      log('[切号] ✅ Sessions 写入成功');
+      
+      // 写入 windsurfAuthStatus
       const teamId = uuidv4();
       const authStatus = {
         name, apiKey, email: account.email,
         teamId, planName: "Pro"
       };
-      log('[切号] 写入 windsurfAuthStatus:');
-      log(`[切号]    name: ${name}`);
-      log(`[切号]    apiKey: ${apiKey}`);
-      log(`[切号]    email: ${account.email}`);
-      log(`[切号]    teamId: ${teamId}`);
-      log(`[切号]    planName: Pro`);
+      log('[切号] 写入 windsurfAuthStatus');
       await this.writeToDB('windsurfAuthStatus', authStatus);
+      log('[切号] ✅ windsurfAuthStatus 写入成功');
       
-      // 立即验证写入
-      const verifyAuthBuffer = await fs.readFile(dbPath);
-      const verifyAuthSQL = await initSqlJs();
-      const verifyAuthDb = new verifyAuthSQL.Database(verifyAuthBuffer);
-      const verifyAuthResult1 = verifyAuthDb.exec('SELECT value FROM ItemTable WHERE key = ?', ['windsurfAuthStatus']);
-      verifyAuthDb.close();
-      
-      if (verifyAuthResult1.length > 0 && verifyAuthResult1[0].values.length > 0) {
-        const verifyAuthValue = verifyAuthResult1[0].values[0][0];
-        if (verifyAuthValue === 'null' || verifyAuthValue === null) {
-          throw new Error('windsurfAuthStatus 写入后验证失败：值为 null');
-        }
-        try {
-          const parsed = JSON.parse(verifyAuthValue);
-          if (!parsed || !parsed.email) {
-            throw new Error('windsurfAuthStatus 写入后验证失败：解析后数据无效');
-          }
-          log(`[切号] ✅ windsurfAuthStatus 写入成功并已验证: ${parsed.email}`);
-        } catch (e) {
-          throw new Error(`windsurfAuthStatus 写入后验证失败：JSON 解析错误 - ${e.message}`);
-        }
-      } else {
-        throw new Error('windsurfAuthStatus 写入后验证失败：数据库中未找到数据');
-      }
-      
+      // 写入 codeium.windsurf
       const installationId = uuidv4();
       const codeiumConfig = {
         "codeium.installationId": installationId,
+        "codeium.apiKey": apiKey,  // ✅ 添加 API Key
         "apiServerUrl": apiServerUrl || "https://server.self-serve.windsurf.com",
         "codeium.hasOneTimeUpdatedUnspecifiedMode": true
       };
-      log('[切号] 写入 codeium.windsurf:');
-      log(`[切号]    installationId: ${installationId}`);
-      log(`[切号]    apiServerUrl: ${codeiumConfig.apiServerUrl}`);
+      log('[切号] 写入 codeium.windsurf');
+      log(`[切号]    API Key: ${apiKey.substring(0, 20)}...`);
       await this.writeToDB('codeium.windsurf', codeiumConfig);
       log('[切号] ✅ codeium.windsurf 写入成功');
       
-      log(`[切号] 写入 codeium.windsurf-windsurf_auth: ${name}`);
+      // 写入 codeium.windsurf-windsurf_auth
+      log('[切号] 写入 codeium.windsurf-windsurf_auth');
       await this.writeToDB('codeium.windsurf-windsurf_auth', name);
       log('[切号] ✅ codeium.windsurf-windsurf_auth 写入成功');
       
       log('[切号] ✅ 所有数据写入完成');
       
-      // 5.4 等待文件系统同步
-      log('[切号] 等待文件系统同步...');
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      log('[切号] ✅ 数据同步完成');
+      // ========== 步骤 5: 启动 Windsurf ==========
+      log('[切号] ========== 步骤 5: 启动 Windsurf ==========');
       
-      // 5.5 验证数据写入
-      log('[切号] ========== 验证数据写入 ==========');
-      const initSqlJsVerify = require('sql.js');
-      const verifyBuffer = await fs.readFile(dbPath);
-      const SQLVerify = await initSqlJsVerify();
-      const verifyDb = new SQLVerify.Database(verifyBuffer);
-      
-      // 验证 sessions
-      const verifySessionsResult = verifyDb.exec('SELECT value FROM ItemTable WHERE key = ?', [sessionsKey]);
-      if (verifySessionsResult.length > 0) {
-        const val = verifySessionsResult[0].values[0][0];
-        const parsed = JSON.parse(val);
-        log(`[切号] ✅ Sessions 已验证: Buffer 长度 ${parsed.data ? parsed.data.length : 0}`);
-      } else {
-        log('[切号] ❌ Sessions 未找到！');
-      }
-      
-      // 验证 windsurfAuthStatus
-      const verifyAuthResult = verifyDb.exec('SELECT value FROM ItemTable WHERE key = ?', ['windsurfAuthStatus']);
-      if (verifyAuthResult.length > 0) {
-        const val = JSON.parse(verifyAuthResult[0].values[0][0]);
-        log(`[切号] ✅ windsurfAuthStatus 已验证: ${val.email} / ${val.name}`);
-      } else {
-        log('[切号] ❌ windsurfAuthStatus 未找到！');
-      }
-      
-      verifyDb.close();
-      
-      // ========== 步骤 5: 使用持久化机制确保数据不被覆盖 ==========
-      log('[切号] ========== 步骤 5: 启用持久化保护机制 ==========');
-      
-      // 使用新的持久化模块
-      const ConfigPersister = require('./configPersister');
-      const persister = new ConfigPersister();
-      
-      // 准备账号数据
-      const accountData = {
-        email: account.email,
-        name: name,
-        apiKey: apiKey,
-        apiServerUrl: apiServerUrl || "https://server.self-serve.windsurf.com"
-      };
-      
-      if (skipClose) {
-        // Windsurf 正在运行，使用强制写入模式
-        log('[切号] Windsurf 正在运行，使用强制写入模式...');
-        
-        // 强制写入 5 次，确保数据生效
-        const forceSuccess = await persister.forceWrite(accountData, 5, 1000);
-        
-        if (forceSuccess) {
-          log('[切号] ✅ 强制写入成功，数据已生效');
-          
-          // 启动监控模式，防止被覆盖
-          log('[切号] 启动监控模式，持续保护配置...');
-          await persister.startMonitoring(accountData, {
-            interval: 3000,     // 每 3 秒检查一次
-            maxRetries: 20,     // 最多重试 20 次
-            autoRecover: true   // 自动恢复
-          });
-          
-          // 10 秒后自动停止监控
-          setTimeout(() => {
-            persister.stopMonitoring();
-            log('[切号] 监控模式已停止');
-          }, 10000);
-          
-          log('[切号] 💡 请刷新 Windsurf 查看登录状态');
-        } else {
-          log('[切号] ⚠️ 强制写入失败，请手动重启 Windsurf');
-        }
-      } else {
-        // 正常流程：启动 Windsurf
-        log('[切号] ========== 步骤 6: 启动 Windsurf ==========');
-        
-        log('[切号] 正在启动 Windsurf...');
-        await WindsurfPathDetector.startWindsurf();
-        log('[切号] ✅ Windsurf 已启动');
-        
-        // 等待 Windsurf 初始化
-        log('[切号] 等待 Windsurf 初始化...');
-        await new Promise(resolve => setTimeout(resolve, 3000));
-        
-        // 使用持久化写入
-        log('[切号] 开始持久化写入...');
-        const writeSuccess = await persister.forceWrite(accountData, 3, 2000);
-        
-        if (writeSuccess) {
-          log('[切号] ✅ 数据写入成功');
-          
-          // 启动短时监控，确保数据不被覆盖
-          log('[切号] 启动短时监控...');
-          await persister.startMonitoring(accountData, {
-            interval: 2000,     // 每 2 秒检查一次
-            maxRetries: 10,     // 最多重试 10 次
-            autoRecover: true   // 自动恢复
-          });
-          
-          // 15 秒后停止监控
-          setTimeout(() => {
-            persister.stopMonitoring();
-            log('[切号] 监控已停止');
-          }, 15000);
-        } else {
-          log('[切号] ⚠️ 数据写入失败，请重试');
-        }
-      }
+      log('[切号] 正在启动 Windsurf...');
+      await WindsurfPathDetector.startWindsurf();
+      log('[切号] ✅ Windsurf 已启动');
       
       log('[切号] ========== 切换完成 ==========');
       log(`[切号] 账号: ${account.email}`);
@@ -988,7 +1459,7 @@ async function switchToAccount(accountId) {
             <i data-lucide="refresh-cw" style="width: 24px; height: 24px; color: #007aff;"></i>
             <h3 class="modal-title">切换账号</h3>
           </div>
-          <button class="modal-close-btn" id="closeSwitchModal" title="关闭" style="display: none;">
+          <button class="modal-close-btn" id="closeSwitchModal" title="关闭">
             <i data-lucide="x" style="width: 20px; height: 20px;"></i>
           </button>
         </div>
@@ -1023,6 +1494,38 @@ async function switchToAccount(accountId) {
     const statusEl = document.getElementById('switchStatus');
     const closeBtn = document.getElementById('closeSwitchModal');
     
+    // 切号状态标记
+    let isSwitching = true;
+    let switchAborted = false;
+    
+    // 关闭按钮处理
+    closeBtn.onclick = () => {
+      if (isSwitching && !switchAborted) {
+        // 切号进行中，询问是否中断
+        const confirmAbort = confirm(
+          '⚠️ 切号正在进行中\n\n' +
+          '强制关闭可能导致：\n' +
+          '• Windsurf 数据不完整\n' +
+          '• 需要手动重启 Windsurf\n' +
+          '• 可能需要重新切号\n\n' +
+          '确定要强制关闭吗？'
+        );
+        
+        if (!confirmAbort) {
+          return;
+        }
+        
+        switchAborted = true;
+        addLog('⚠️ 用户中断切号操作');
+        statusEl.textContent = '⚠️ 已中断';
+        statusEl.style.color = '#ff9500';
+      }
+      
+      // 清理资源
+      window.ipcRenderer.removeListener('switch-log', logListener);
+      modal.remove();
+    };
+    
     // 添加日志函数
     function addLog(message) {
       // 解析日志类型
@@ -1045,13 +1548,13 @@ async function switchToAccount(accountId) {
       
       // 更新状态
       if (message.includes('切换完成')) {
+        isSwitching = false;
         statusEl.textContent = '✅ 切换成功';
         statusEl.style.color = '#34c759';
-        closeBtn.style.display = 'block';
       } else if (message.includes('切换失败')) {
+        isSwitching = false;
         statusEl.textContent = '❌ 切换失败';
         statusEl.style.color = '#ff3b30';
-        closeBtn.style.display = 'block';
       }
     }
     
@@ -1062,17 +1565,9 @@ async function switchToAccount(accountId) {
     window.ipcRenderer.on('switch-log', logListener);
     
     try {
-      // 检查 Windsurf 是否正在运行
-      const isRunning = await window.ipcRenderer.invoke('check-windsurf-running');
-      const skipClose = isRunning; // 如果正在运行，跳过关闭
-      
-      if (skipClose) {
-        addLog('⚠️ 检测到 Windsurf 正在运行，将直接写入数据（不关闭）');
-        addLog('💡 这可能会更快，但需要刷新 Windsurf 才能看到效果');
-      }
-      
       // 执行切换（通过 IPC 调用）
-      const result = await window.ipcRenderer.invoke('switch-account', account, skipClose);
+      // 注意：切换过程会自动检测并关闭 Windsurf
+      const result = await window.ipcRenderer.invoke('switch-account', account);
       
       if (!result.success) {
         addLog(`❌ 切换失败: ${result.error}`);
@@ -1083,19 +1578,15 @@ async function switchToAccount(accountId) {
     } catch (error) {
       console.error('切换账号失败:', error);
       addLog(`❌ 发生错误: ${error.message}`);
+      isSwitching = false;
       statusEl.textContent = '❌ 发生错误';
       statusEl.style.color = '#ff3b30';
     } finally {
+      // 标记切号结束
+      isSwitching = false;
       // 移除日志监听器
       window.ipcRenderer.removeListener('switch-log', logListener);
-      closeBtn.style.display = 'block';
     }
-    
-    // 关闭按钮
-    closeBtn.onclick = () => {
-      window.ipcRenderer.removeListener('switch-log', logListener);
-      modal.remove();
-    };
     
     // 点击背景关闭
     modal.onclick = (e) => {

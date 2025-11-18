@@ -1,6 +1,6 @@
 {
   "name": "windsurf-tool",
-  "version": "4.0.0",
+  "version": "4.3.0",
   "description": "Windsurf-Tool - 自动化管理 Windsurf 账号，支持批量注册、账号切换、到期提醒等功能",
   "main": "main.js",
   "scripts": {
@@ -19,7 +19,7 @@
     "build:linux": "electron-builder --linux",
     "build:linux:x64": "electron-builder --linux --x64",
     "test:switch-with-reset": "electron test-account-switch-with-reset.js",
-    "postinstall": "node -e \"const fs = require('fs'); const path = require('path'); const dir = path.join(__dirname, 'scripts'); if(fs.existsSync(dir)) { fs.readdirSync(dir).filter(f => f.endsWith('.py')).forEach(f => { const p = path.join(dir, f); if(process.platform !== 'win32') fs.chmodSync(p, 0o755); }); }\""
+    "postinstall": "echo 'Installation complete'"
   },
   "keywords": [
     "windsurf",
@@ -37,11 +37,12 @@
   },
   "dependencies": {
     "axios": "^1.6.0",
-    "chrome-launcher": "^1.2.1",
     "fs-extra": "^11.3.2",
     "imap": "^0.8.19",
+    "keytar": "^7.9.0",
     "lucide": "^0.553.0",
     "mailparser": "^3.6.5",
+    "node-dpapi-prebuilt": "^1.0.0",
     "puppeteer": "^21.11.0",
     "puppeteer-real-browser": "^1.3.8",
     "sql.js": "^1.10.3",
@@ -60,7 +61,8 @@
     "productName": "Windsurf-Tool",
     "copyright": "Copyright © 2024 crispvibe",
     "asar": false,
-    "compression": "store",
+    "compression": "normal",
+    "afterPack": "./build-scripts/afterPack.js",
     "buildDependenciesFromSource": false,
     "nodeGypRebuild": false,
     "directories": {
@@ -75,7 +77,8 @@
       "js/**/*",
       "src/**/*",
       "bin/**/*",
-      "scripts/**/*",
+      "pay/**/*",
+      "build-scripts/**/*",
       "package.json",
       "!**/*.{iml,o,hprof,orig,pyc,pyo,rbc,swp,csproj,sln,xproj}",
       "!.editorconfig",
@@ -85,18 +88,6 @@
       "!**/{appveyor.yml,.travis.yml,circle.yml}",
       "!**/{npm-debug.log,yarn.lock,.yarn-integrity,.yarn-metadata.json}"
     ],
-    "extraResources": [
-      {
-        "from": "scripts",
-        "to": "scripts",
-        "filter": [
-          "**/*.py",
-          "**/*.txt",
-          "**/*.md"
-        ]
-      }
-    ],
-    "afterPack": "./build-scripts/afterPack.js",
     "mac": {
       "category": "public.app-category.developer-tools",
       "hardenedRuntime": true,
@@ -108,17 +99,6 @@
         "dmg"
       ],
       "artifactName": "${productName}-${version}-macOS-${arch}.${ext}",
-      "extraResources": [
-        {
-          "from": "scripts",
-          "to": "scripts",
-          "filter": [
-            "**/*.py",
-            "**/*.txt",
-            "**/*.md"
-          ]
-        }
-      ],
       "entitlements": null,
       "entitlementsInherit": null,
       "type": "distribution",
@@ -152,25 +132,13 @@
     },
     "win": {
       "target": [
-        "nsis",
-        "portable"
+        "nsis"
       ],
       "icon": "build/icon.ico",
-      "artifactName": "Windsurf-Tool-Setup-${version}-${arch}.${ext}",
+      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}",
       "requestedExecutionLevel": "requireAdministrator",
       "verifyUpdateCodeSignature": false,
-      "publisherName": "Windsurf Tool",
-      "extraResources": [
-        {
-          "from": "scripts",
-          "to": "scripts",
-          "filter": [
-            "**/*.py",
-            "**/*.txt",
-            "**/*.md"
-          ]
-        }
-      ]
+      "publisherName": "Windsurf Tool"
     },
     "nsis": {
       "oneClick": false,
@@ -185,7 +153,7 @@
       "uninstallerIcon": "build/icon.ico",
       "installerHeaderIcon": "build/icon.ico",
       "license": "LICENSE",
-      "artifactName": "${productName}-Setup-${version}.${ext}",
+      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}",
       "displayLanguageSelector": false,
       "installerLanguages": [
         "zh_CN",

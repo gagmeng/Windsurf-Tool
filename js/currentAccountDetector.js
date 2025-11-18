@@ -151,61 +151,63 @@ async function updateAccountListWithCurrent() {
     
     console.log('[账号列表] 当前登录:', currentAccount.email);
     
-    // 查找所有账号卡片
-    const accountCards = document.querySelectorAll('.account-card');
+    // 查找所有账号行（使用新的选择器）
+    const accountItems = document.querySelectorAll('.account-item:not(.header)');
     
-    accountCards.forEach(card => {
-      const emailElement = card.querySelector('.account-email');
-      const switchButton = card.querySelector('.switch-account-btn');
+    if (accountItems.length === 0) {
+      console.warn('[账号列表] 未找到任何账号行');
+      return;
+    }
+    
+    accountItems.forEach(item => {
+      // 使用data-email属性获取邮箱
+      const email = item.getAttribute('data-email');
+      const emailElement = item.querySelector('.acc-col-email');
       
-      if (!emailElement || !switchButton) return;
+      if (!email || !emailElement) return;
       
-      const cardEmail = emailElement.textContent.trim();
-      
-      // 检查是否是当前账号（邮箱匹配）
-      if (cardEmail.toLowerCase() === currentAccount.email.toLowerCase()) {
-        // 修改按钮为"正在使用"
-        switchButton.textContent = '正在使用';
-        switchButton.disabled = true;
-        switchButton.style.cssText = `
-          background: #34c759;
-          color: white;
-          cursor: not-allowed;
-          opacity: 0.8;
-        `;
+      // 检查是否是当前账号（邮箱匹配，不区分大小写）
+      if (email.toLowerCase() === currentAccount.email.toLowerCase()) {
+        // 添加高亮样式
+        item.classList.add('current-account');
+        item.style.background = 'linear-gradient(90deg, #f0f9ff 0%, #ffffff 100%)';
+        item.style.borderLeft = '3px solid #007aff';
         
-        // 添加当前账号标记
-        if (!card.querySelector('.current-badge')) {
+        // 在邮箱列添加"当前"标记
+        if (!emailElement.querySelector('.current-badge')) {
           const badge = document.createElement('span');
           badge.className = 'current-badge';
           badge.textContent = '当前';
           badge.style.cssText = `
             display: inline-block;
-            padding: 2px 8px;
-            background: #34c759;
+            padding: 2px 6px;
+            background: #007aff;
             color: white;
-            border-radius: 4px;
-            font-size: 11px;
-            margin-left: 8px;
-            font-weight: 500;
+            border-radius: 3px;
+            font-size: 10px;
+            margin-left: 6px;
+            font-weight: 600;
+            vertical-align: middle;
           `;
           emailElement.appendChild(badge);
         }
         
-        console.log('[账号列表] ✅ 已标记当前账号:', cardEmail);
+        console.log('[账号列表] ✅ 已标记当前账号:', email);
       } else {
-        // 恢复为"切换"按钮
-        switchButton.textContent = '切换';
-        switchButton.disabled = false;
-        switchButton.style.cssText = '';
+        // 移除高亮样式
+        item.classList.remove('current-account');
+        item.style.background = '';
+        item.style.borderLeft = '';
         
         // 移除当前账号标记
-        const badge = card.querySelector('.current-badge');
+        const badge = emailElement.querySelector('.current-badge');
         if (badge) {
           badge.remove();
         }
       }
     });
+    
+    console.log('[账号列表] ✅ 当前账号标记更新完成');
     
   } catch (error) {
     console.error('[账号列表] 更新失败:', error);
