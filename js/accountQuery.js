@@ -118,6 +118,7 @@ const AccountQuery = {
 
       let accessToken;
       let newTokenData = null;
+      let needReLogin = false; // 标记是否需要重新登录
       
       // 优化: 如果本地有 idToken 且未过期,直接使用,避免每次都刷新
       const now = Date.now();
@@ -126,7 +127,13 @@ const AccountQuery = {
       if (tokenExpired) {
         // Token 不存在或已过期,需要刷新
         try {
+          console.log(`[Token刷新] 账号 ${account.email} 的Token已过期，正在刷新...`);
           const tokenData = await this.getAccessToken(account.refreshToken);
+          
+          if (!tokenData || !tokenData.accessToken) {
+            throw new Error('刷新Token失败：返回的Token为空');
+          }
+          
           accessToken = tokenData.accessToken;
           // 保存新 Token 信息,用于后续更新到本地
           newTokenData = {
@@ -134,32 +141,171 @@ const AccountQuery = {
             idTokenExpiresAt: now + (tokenData.expiresIn * 1000),
             refreshToken: tokenData.refreshToken
           };
+          console.log(`[Token刷新] 账号 ${account.email} Token刷新成功`);
         } catch (error) {
-          // refreshToken 过期或失效
-          if (error.message.includes('TOKEN_EXPIRED') || error.message.includes('INVALID_REFRESH_TOKEN')) {
-            throw new Error('RefreshToken 已过期,请重新获取 Token');
+          console.error(`[Token刷新] 账号 ${account.email} Token刷新失败:`, error);
+          
+          // refreshToken 过期或失效，标记需要重新登录
+          if (error.message.includes('TOKEN_EXPIRED') || 
+              error.message.includes('INVALID_REFRESH_TOKEN') ||
+              error.message.includes('获取 access_token 失败')) {
+            console.log(`[Token刷新] RefreshToken已过期，尝试使用邮箱密码重新获取...`);
+            needReLogin = true;
+          } else {
+            // 其他错误（网络错误、超时等）
+            throw new Error(`刷新Token失败: ${error.message}`);
           }
-          throw error;
         }
       } else {
         // Token 未过期,直接使用本地的
         accessToken = account.idToken;
+        console.log(`[Token使用] 账号 ${account.email} 使用本地Token（${Math.round((account.idTokenExpiresAt - now) / 1000 / 60)}分钟后过期）`);
+      }
+      
+      // 如果需要重新登录（RefreshToken过期）
+      if (needReLogin) {
+        if (!account.email || !account.password) {
+          const errorMsg = 'RefreshToken已过期，但账号缺少邮箱或密码，无法自动重新获取Token';
+          console.error(`[重新登录] ${errorMsg}`);
+          throw new Error(errorMsg);
+        }
+        
+        try {
+          console.log(`[重新登录] 使用邮箱密码重新获取Token: ${account.email}`);
+          console.log(`[重新登录] 邮箱: ${account.email}, 密码长度: ${account.password?.length || 0}`);
+          
+          // 使用IPC调用主进程获取Token（渲染进程不能直接require主进程模块）
+          console.log(`[重新登录] 通过IPC调用主进程获取Token...`);
+          const loginResult = await window.ipcRenderer.invoke('get-account-token', {
+            email: account.email,
+            password: account.password
+          });
+          
+          console.log(`[重新登录] IPC返回结果:`, loginResult?.success ? '成功' : '失败');
+          
+          if (!loginResult || !loginResult.success) {
+            const errorDetail = loginResult?.error || '重新登录失败：IPC调用失败';
+            console.error(`[重新登录] IPC返回错误:`, errorDetail);
+            console.error(`[重新登录] 完整响应:`, loginResult);
+            throw new Error(errorDetail);
+          }
+          
+          if (!loginResult.account || !loginResult.account.idToken) {
+            throw new Error('重新登录失败：返回的Token为空');
+          }
+          
+          accessToken = loginResult.account.idToken;
+          newTokenData = {
+            idToken: loginResult.account.idToken,
+            idTokenExpiresAt: loginResult.account.idTokenExpiresAt,
+            refreshToken: loginResult.account.refreshToken,
+            apiKey: loginResult.account.apiKey,
+            name: loginResult.account.name,
+            apiServerUrl: loginResult.account.apiServerUrl
+          };
+          
+          console.log(`[重新登录] 账号 ${account.email} 重新获取Token成功`);
+          console.log(`[重新登录] 新Token信息:`, {
+            hasIdToken: !!newTokenData.idToken,
+            hasRefreshToken: !!newTokenData.refreshToken,
+            hasApiKey: !!newTokenData.apiKey
+          });
+        } catch (error) {
+          console.error(`[重新登录] 账号 ${account.email} 重新获取Token失败:`, error);
+          console.error(`[重新登录] 错误详情:`, {
+            message: error.message,
+            stack: error.stack
+          });
+          throw new Error(`重新获取Token失败: ${error.message}`);
+        }
+      }
+      
+      // 验证Token是否有效
+      if (!accessToken) {
+        throw new Error('Token无效：accessToken为空');
       }
       
       // 2. 查询使用情况
-      const usageInfo = await this.getUsageInfo(accessToken);
-      
-      // 计算使用百分比
-      if (usageInfo.totalCredits > 0) {
-        usageInfo.usagePercentage = Math.round((usageInfo.usedCredits / usageInfo.totalCredits) * 100);
+      try {
+        const usageInfo = await this.getUsageInfo(accessToken);
+        
+        // 计算使用百分比
+        if (usageInfo.totalCredits > 0) {
+          usageInfo.usagePercentage = Math.round((usageInfo.usedCredits / usageInfo.totalCredits) * 100);
+        }
+        
+        return {
+          success: true,
+          ...usageInfo,
+          // 如果刷新了 Token,返回新的 Token 信息
+          ...(newTokenData && { newTokenData })
+        };
+      } catch (error) {
+        // 如果是401错误，可能是Token刷新后仍然无效，尝试重新登录
+        if ((error.message.includes('401') || error.message.includes('Unauthorized')) && !needReLogin) {
+          console.log(`[401错误] Token验证失败，尝试重新登录: ${account.email}`);
+          console.log(`[401错误] 当前使用的Token长度: ${accessToken?.length || 0}`);
+          
+          if (!account.email || !account.password) {
+            console.error(`[401错误] 账号缺少邮箱或密码，无法重新登录`);
+            throw new Error('Token验证失败（401），账号缺少邮箱或密码，无法自动重新获取Token');
+          }
+          
+          try {
+            console.log(`[401重试] 开始重新登录: ${account.email}`);
+            
+            // 使用IPC调用主进程获取Token（渲染进程不能直接require主进程模块）
+            console.log(`[401重试] 通过IPC调用主进程获取Token...`);
+            const loginResult = await window.ipcRenderer.invoke('get-account-token', {
+              email: account.email,
+              password: account.password
+            });
+            
+            console.log(`[401重试] IPC返回结果:`, loginResult?.success ? '成功' : '失败');
+            
+            if (!loginResult || !loginResult.success) {
+              const errorDetail = loginResult?.error || '重新登录失败：IPC调用失败';
+              console.error(`[401重试] IPC返回错误:`, errorDetail);
+              console.error(`[401重试] 完整响应:`, loginResult);
+              throw new Error(errorDetail);
+            }
+            
+            if (!loginResult.account || !loginResult.account.idToken) {
+              throw new Error('重新登录失败：返回的Token为空');
+            }
+            
+            console.log(`[401重试] 使用新Token重试查询...`);
+            // 使用新Token重试
+            const retryUsageInfo = await this.getUsageInfo(loginResult.account.idToken);
+            console.log(`[401重试] 查询成功`);
+            
+            if (retryUsageInfo.totalCredits > 0) {
+              retryUsageInfo.usagePercentage = Math.round((retryUsageInfo.usedCredits / retryUsageInfo.totalCredits) * 100);
+            }
+            
+            return {
+              success: true,
+              ...retryUsageInfo,
+              newTokenData: {
+                idToken: loginResult.account.idToken,
+                idTokenExpiresAt: loginResult.account.idTokenExpiresAt,
+                refreshToken: loginResult.account.refreshToken,
+                apiKey: loginResult.account.apiKey,
+                name: loginResult.account.name,
+                apiServerUrl: loginResult.account.apiServerUrl
+              }
+            };
+          } catch (retryError) {
+            console.error(`[401重试] 重新登录失败:`, retryError);
+            console.error(`[401重试] 错误详情:`, {
+              message: retryError.message,
+              stack: retryError.stack
+            });
+            throw new Error(`Token验证失败（401），自动重新获取Token失败: ${retryError.message}`);
+          }
+        }
+        throw error;
       }
-      
-      return {
-        success: true,
-        ...usageInfo,
-        // 如果刷新了 Token,返回新的 Token 信息
-        ...(newTokenData && { newTokenData })
-      };
     } catch (error) {
       console.error(`查询账号 ${account.email} 失败:`, error);
       return {

@@ -1,6 +1,7 @@
 const { connect } = require('puppeteer-real-browser');
 const { app } = require('electron'); // 导入electron的app模块
 const os = require('os'); // 导入os模块
+const crypto = require('crypto'); // 用于生成CDN Token
 
 class RegistrationBot {
   constructor(config) {
@@ -13,6 +14,54 @@ class RegistrationBot {
     this.isCancelled = false;
     // Chrome 路径缓存
     this.chromePathCache = null;
+    
+    // CDN Token 鉴权配置（与versionManager保持一致）
+    this.cdnAuthConfig = {
+      enabled: true,
+      primaryKey: '2rRYkOz4ClI8u32KxQHKZBVtzk05Gf2',
+      backupKey: 'Q133nD00MnwJ',
+      paramName: 'X-WsTool-Auth-9K7mP2nQ4vL8xR6jT3wY5zH1cF0bN',
+      expireTime: 120
+    };
+  }
+
+  /**
+   * 生成 CDN Token 鉴权参数（腾讯云 CDN TypeA）
+   * @param {string} path - 请求路径（如 /reg）
+   * @returns {string} - 鉴权参数字符串
+   */
+  generateCdnToken(path) {
+    try {
+      const timestamp = Math.floor(Date.now() / 1000);
+      const expireTimestamp = timestamp + this.cdnAuthConfig.expireTime;
+      const rand = Math.random().toString(36).substring(2, 10);
+      const uid = 0;
+      const signString = `${path}-${expireTimestamp}-${rand}-${uid}-${this.cdnAuthConfig.primaryKey}`;
+      const md5Hash = crypto.createHash('md5').update(signString).digest('hex');
+      return `${expireTimestamp}-${rand}-${uid}-${md5Hash}`;
+    } catch (error) {
+      console.error('生成 CDN Token 失败:', error);
+      return '';
+    }
+  }
+
+  /**
+   * 生成带鉴权的注册URL
+   * @returns {string} - 完整的注册URL（包含鉴权参数）
+   */
+  generateRegistrationUrl() {
+    // 使用HTTPS（如果CDN强制重定向）
+    // 注意：baseUrl 要带末尾斜杠，生成的URL格式为 /reg/?参数
+    const baseUrl = 'https://windsurf-api.crispvibe.cn/reg/';  // 末尾带斜杠
+    const path = '/reg/';  // 用于签名计算，必须与实际访问的路径一致
+    
+    if (this.cdnAuthConfig.enabled) {
+      const cdnToken = this.generateCdnToken(path);
+      const paramName = this.cdnAuthConfig.paramName;
+      return `${baseUrl}?${paramName}=${cdnToken}`;
+    }
+    
+    return baseUrl;
   }
 
   /**
@@ -620,13 +669,17 @@ class RegistrationBot {
           retryCount++;
           this.log(`尝试访问注册页面 (${retryCount}/${maxRetries})`);
           
-          await page.goto('https://windsurf.com/account/register?referral_code=aav1unksbafw1c1e', {
+          // 生成带鉴权的注册URL
+          const registrationUrl = this.generateRegistrationUrl();
+          this.log(`访问注册页面: ${registrationUrl}`);
+          
+          await page.goto(registrationUrl, {
             waitUntil: 'domcontentloaded', // 改为更宽松的等待条件
-            timeout: 60000 // 增加到60秒
+            timeout: 120000 // 增加到120秒
           });
           
           // 等待页面基本元素加载
-          await page.waitForSelector('body', { timeout: 30000 });
+          await page.waitForSelector('body', { timeout: 120000 });
           navigationSuccess = true;
           this.log('注册页面访问成功');
           
@@ -753,7 +806,7 @@ class RegistrationBot {
       this.log('步骤1: 填写基本信息');
       
       // 等待表单加载
-      await page.waitForSelector('input', { timeout: 30000 });
+      await page.waitForSelector('input', { timeout: 120000 });
       await this.sleep(2000);
       
       // 填写所有输入框
@@ -815,7 +868,7 @@ class RegistrationBot {
       this.log('步骤2: 填写密码信息');
       
       // 等待密码页面加载
-      await page.waitForSelector('input[type="password"]', { timeout: 30000 });
+      await page.waitForSelector('input[type="password"]', { timeout: 120000 });
       await this.sleep(2000);
       
       // 查找所有密码输入框
@@ -875,7 +928,7 @@ class RegistrationBot {
       this.log('步骤4: 等待邮箱验证码...');
       
       // 等待验证码输入框
-      await page.waitForSelector('input[type="text"], input[name="code"]', { timeout: 30000 });
+      await page.waitForSelector('input[type="text"], input[name="code"]', { timeout: 120000 });
       
       // 检查取消标志
       if (this.isCancelled) {
@@ -1061,17 +1114,10 @@ class RegistrationBot {
           }
         }
         
-        // 保存账号到本地（使用文件锁确保线程安全）
-        const fs = require('fs').promises;
-        const path = require('path');
-        const { app } = require('electron');
-        
-        // 使用全局的 accountsFileLock
-        const { accountsFileLock } = require('../main.js');
-        const ACCOUNTS_FILE = path.join(app.getPath('userData'), 'accounts.json');
+        // 保存账号到本地（通过IPC调用主进程，确保线程安全）
+        const { ipcRenderer } = require('electron');
         
         const account = {
-          id: Date.now().toString(),
           email,
           password,
           firstName,
@@ -1081,35 +1127,23 @@ class RegistrationBot {
           apiServerUrl: tokenInfo ? tokenInfo.apiServerUrl : null,
           refreshToken: tokenInfo ? tokenInfo.refreshToken : null,
           idToken: tokenInfo ? tokenInfo.idToken : null,
-          idTokenExpiresAt: tokenInfo ? (Date.now() + 3600 * 1000) : null,
-          createdAt: new Date().toISOString()
+          idTokenExpiresAt: tokenInfo ? (Date.now() + 3600 * 1000) : null
         };
         
-        // 使用文件锁添加账号
-        await accountsFileLock.acquire(async () => {
-          let accounts = [];
-          try {
-            const data = await fs.readFile(ACCOUNTS_FILE, 'utf-8');
-            accounts = JSON.parse(data);
-          } catch (error) {
-            // 文件不存在，使用空数组
-          }
-          
-          // 检查是否已存在
-          const existingIndex = accounts.findIndex(a => a.email === email);
-          if (existingIndex >= 0) {
-            // 更新现有账号
-            accounts[existingIndex] = { ...accounts[existingIndex], ...account };
+        // 使用IPC调用主进程的add-account，自动使用文件锁
+        try {
+          const addResult = await ipcRenderer.invoke('add-account', account);
+          if (addResult.success) {
+            console.log('账号已保存到本地');
+            this.log('账号已保存到本地');
           } else {
-            // 添加新账号
-            accounts.push(account);
+            console.warn('保存账号失败:', addResult.error);
+            this.log(`保存账号失败: ${addResult.error}`);
           }
-          
-          await fs.writeFile(ACCOUNTS_FILE, JSON.stringify(accounts, null, 2));
-        });
-        
-        console.log('账号已保存到本地');
-        this.log('账号已保存到本地');
+        } catch (error) {
+          console.error('保存账号异常:', error);
+          this.log(`保存账号异常: ${error.message}`);
+        }
         
         return {
           success: true,

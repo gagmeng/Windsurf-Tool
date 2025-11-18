@@ -32,8 +32,8 @@ class EmailReceiver {
         port: this.config.port || 993,
         tls: true,
         tlsOptions: { rejectUnauthorized: false },
-        connTimeout: 30000, // 连接超时30秒
-        authTimeout: 30000, // 认证超时30秒
+        connTimeout: 120000, // 连接超时120秒
+        authTimeout: 120000, // 认证超时120秒
         keepalive: {
           interval: 10000,
           idleInterval: 300000,

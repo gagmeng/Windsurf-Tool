@@ -798,62 +798,8 @@ const AccountManager = {
       }
       
       // 使用 accountQuery.js 中的 queryAccount 方法
-      let queryResult = await window.AccountQuery.queryAccount(account);
-      
-      // 如果 RefreshToken 过期,尝试用邮箱密码重新获取 Token
-      if (!queryResult.success && queryResult.error && queryResult.error.includes('RefreshToken 已过期')) {
-        if (typeof showToast === 'function') {
-          showToast('检测到 Token 过期,正在重新获取...', 'info');
-        }
-        
-        // 检查是否有邮箱和密码
-        if (account.email && account.password) {
-          try {
-            // 调用主进程的获取 Token 方法
-            const loginResult = await window.ipcRenderer.invoke('get-account-token', {
-              email: account.email,
-              password: account.password
-            });
-            
-            if (loginResult.success && loginResult.account) {
-              // 更新账号的 Token 信息
-              const tokenUpdateResult = await window.ipcRenderer.invoke('update-account', {
-                id: account.id,
-                apiKey: loginResult.account.apiKey,
-                refreshToken: loginResult.account.refreshToken,
-                idToken: loginResult.account.idToken,
-                idTokenExpiresAt: loginResult.account.idTokenExpiresAt,
-                name: loginResult.account.name,
-                apiServerUrl: loginResult.account.apiServerUrl
-              });
-              
-              if (tokenUpdateResult.success) {
-                if (typeof showToast === 'function') {
-                  showToast('Token 重新获取成功,继续刷新...', 'success');
-                }
-                
-                // 重新加载账号信息
-                const accountsResult = await window.ipcRenderer.invoke('get-accounts');
-                const updatedAccount = accountsResult.accounts.find(acc => acc.id === account.id);
-                
-                // 再次查询积分
-                queryResult = await window.AccountQuery.queryAccount(updatedAccount);
-              }
-            } else {
-              throw new Error(loginResult.error || '获取 Token 失败');
-            }
-          } catch (error) {
-            console.error('自动重新获取 Token 失败:', error);
-            if (typeof showToast === 'function') {
-              showToast('自动获取 Token 失败: ' + error.message, 'error');
-            }
-          }
-        } else {
-          if (typeof showToast === 'function') {
-            showToast('账号缺少密码,无法自动重新获取 Token', 'error');
-          }
-        }
-      }
+      // queryAccount 已经内置了自动Token刷新和重新登录逻辑
+      const queryResult = await window.AccountQuery.queryAccount(account);
       
       if (queryResult.success) {
         // 准备更新的账号数据
@@ -890,11 +836,32 @@ const AccountManager = {
           throw new Error(updateResult.error || '更新账号信息失败');
         }
       } else {
-        alert('刷新失败：' + (queryResult.error || '未知错误'));
+        console.error('刷新失败，详细信息:', queryResult);
+        const errorMsg = queryResult.error || '未知错误';
+        
+        // 提供更友好的错误提示
+        let userMessage = `刷新失败：${errorMsg}`;
+        
+        if (errorMsg.includes('账号缺少邮箱或密码')) {
+          userMessage += '\n\n提示：该账号缺少登录凭据，请手动重新获取Token';
+        } else if (errorMsg.includes('401')) {
+          userMessage += '\n\n提示：Token验证失败，请检查控制台日志查看详细错误信息';
+        } else if (errorMsg.includes('重新获取Token失败')) {
+          userMessage += '\n\n可能原因：\n1. 邮箱密码错误\n2. 网络连接问题\n3. 服务器错误\n\n请打开控制台查看详细日志';
+        }
+        
+        alert(userMessage);
       }
     } catch (error) {
       console.error('刷新账号信息失败:', error);
-      alert('刷新失败: ' + error.message);
+      console.error('错误堆栈:', error.stack);
+      
+      let errorMsg = `刷新失败: ${error.message}`;
+      if (error.message.includes('401') || error.message.includes('Token')) {
+        errorMsg += '\n\n请打开控制台（F12）查看详细错误日志';
+      }
+      
+      alert(errorMsg);
     }
   },
 

@@ -4448,7 +4448,12 @@ function showBatchTokenProgressModal() {
     document.getElementById('batchTokenFailCount').textContent = '0';
     document.getElementById('batchTokenTotalCount').textContent = '0';
     document.getElementById('batchTokenLogContainer').innerHTML = '<div style="color: #86868b;">正在启动...</div>';
-    document.getElementById('batchTokenCloseBtn').disabled = true;
+    
+    // 设置按钮为取消状态
+    const closeBtn = document.getElementById('batchTokenCloseBtn');
+    closeBtn.disabled = false; // 允许点击取消
+    closeBtn.textContent = '取消';
+    closeBtn.className = 'btn btn-danger'; // 红色按钮表示取消
 
     modal.style.display = 'flex';
     setTimeout(() => modal.classList.add('active'), 10);
@@ -4548,22 +4553,37 @@ ipcRenderer.on('batch-token-log', (event, data) => {
 
 // 监听批量Token完成
 ipcRenderer.on('batch-token-complete', (event, data) => {
-  const { total, successCount, failCount } = data;
+  const { total, successCount, failCount, cancelled } = data;
 
   addBatchTokenLog('', 'info');
-  addBatchTokenLog('========== 批量获取完成 ==========', 'info');
-  addBatchTokenLog(`总计: ${total} 个账号`, 'info');
-  addBatchTokenLog(`成功: ${successCount} 个`, 'success');
-  addBatchTokenLog(`失败: ${failCount} 个`, failCount > 0 ? 'error' : 'info');
-
-  // 启用关闭按钮
-  document.getElementById('batchTokenCloseBtn').disabled = false;
-
-  // 显示完成提示
-  if (failCount === 0) {
-    showToast(`批量获取完成！成功 ${successCount} 个`, 'success');
+  
+  if (cancelled) {
+    // 用户取消
+    addBatchTokenLog('========== 操作已取消 ==========', 'warning');
+    addBatchTokenLog(`已处理: ${successCount + failCount} / ${total} 个账号`, 'info');
+    addBatchTokenLog(`成功: ${successCount} 个`, 'success');
+    addBatchTokenLog(`失败: ${failCount} 个`, failCount > 0 ? 'error' : 'info');
+    addBatchTokenLog(`剩余: ${total - successCount - failCount} 个（已跳过）`, 'warning');
+    
+    showToast(`操作已取消！已处理 ${successCount + failCount} 个账号`, 'warning');
   } else {
-    showToast(`批量获取完成！成功 ${successCount} 个，失败 ${failCount} 个`, 'warning');
+    // 正常完成
+    addBatchTokenLog('========== 批量获取完成 ==========', 'info');
+    addBatchTokenLog(`总计: ${total} 个账号`, 'info');
+    addBatchTokenLog(`成功: ${successCount} 个`, 'success');
+    addBatchTokenLog(`失败: ${failCount} 个`, failCount > 0 ? 'error' : 'info');
+    
+    if (failCount === 0) {
+      showToast(`批量获取完成！成功 ${successCount} 个`, 'success');
+    } else {
+      showToast(`批量获取完成！成功 ${successCount} 个，失败 ${failCount} 个`, 'warning');
+    }
   }
+
+  // 更新关闭按钮状态
+  const closeBtn = document.getElementById('batchTokenCloseBtn');
+  closeBtn.disabled = false;
+  closeBtn.textContent = '关闭';
+  closeBtn.className = 'btn btn-secondary'; // 恢复为普通按钮
 });
 

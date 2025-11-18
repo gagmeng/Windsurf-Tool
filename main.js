@@ -453,6 +453,18 @@ ipcMain.handle('batch-get-all-tokens', async (event) => {
       // 检查是否被取消
       if (batchTokenCancelled) {
         console.log('[批量获取Token] 用户取消操作');
+        
+        // 发送取消状态，让前端可以关闭弹窗
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('batch-token-complete', {
+            total: accountsNeedToken.length,
+            successCount,
+            failCount,
+            cancelled: true,
+            results
+          });
+        }
+        
         break;
       }
       

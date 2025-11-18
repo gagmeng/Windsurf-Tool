@@ -41,7 +41,7 @@ class VersionManager {
       primaryKey: '2rRYkOz4ClI8u32KxQHKZBVtzk05Gf2',  // 主鉴权密钥
       backupKey: 'Q133nD00MnwJ',  // 备鉴权密钥
       paramName: 'X-WsTool-Auth-9K7mP2nQ4vL8xR6jT3wY5zH1cF0bN',  // 鉴权参数名
-      expireTime: 60  // 有效时长（秒）- 必须与 CDN 配置一致
+      expireTime: 120  // 有效时长（秒）- 必须与 CDN 配置一致
     };
     
     // 从本地存储加载设置
@@ -270,7 +270,7 @@ class VersionManager {
           'User-Agent': 'Windsurf-Tool-Version-Checker',
           'Accept': 'application/json'
         },
-        timeout: 10000
+        timeout: 120000
       };
 
       const req = httpModule.request(options, (res) => {
