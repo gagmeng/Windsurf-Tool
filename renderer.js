@@ -104,16 +104,6 @@ async function refreshAllData() {
 // 引入 Electron shell 模块（全局使用）
 const { shell } = require('electron');
 
-// 版本更新相关变量
-let versionUpdateInfo = null;
-let lastVersionCheckTime = 0;
-let versionCheckCooldown = 30 * 1000; // 30秒冷却时间
-let isForceUpdateActive = false; // 是否有强制更新弹窗激活
-let isQuitting = false; // 是否正在退出应用（用于区分退出和刷新）
-
-// 维护模式相关变量
-let isMaintenanceModeActive = false; // 是否处于维护模式
-
 /**
  * 原赞助弹窗已移除
  */
@@ -1325,12 +1315,6 @@ window.switchTabLogic = function(tabName) {
   } else if (tabName === 'switch') {
     loadAccountsForSwitch();
     loadCurrentMachineId();
-  } else if (tabName === 'freeAccounts') {
-    // 免费账号页面，确保 iframe 加载
-    const iframe = document.getElementById('freeAccountsFrame');
-    if (iframe && !iframe.src) {
-      iframe.src = 'https://www.crispvibe.cn/windsurf';
-    }
   } else if (tabName === 'token') {
     // Token获取工具页面，加载JS模块
     try {

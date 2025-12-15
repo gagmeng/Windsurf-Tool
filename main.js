@@ -43,7 +43,6 @@ const accountsFileLock = require('./src/accountsFileLock');
 const { exec } = require('child_process');
 const util = require('util');
 const execPromise = util.promisify(exec);
-const VersionManager = require(path.join(__dirname, 'src', 'versionManager'));
 
 // 处理 EPIPE 错误（管道关闭时的写入错误）
 process.stdout.on('error', (err) => {
@@ -56,14 +55,8 @@ process.stderr.on('error', (err) => {
 });
 
 let mainWindow;
-let versionManager;
-let versionCheckInterval;
 // 当前批量注册的机器人实例，用于支持跨平台取消
 let currentRegistrationBot = null;
-// 强制更新和维护模式状态
-let isForceUpdateActive = false;
-let isMaintenanceModeActive = false;
-let isApiUnavailable = false;
 
 // 应用名称 - 必须设置为 'Windsurf' 以使用相同的 Keychain 密钥
 app.setName('Windsurf');
@@ -121,120 +114,6 @@ function getSafePath(base, ...paths) {
 const userDataPath = app.getPath('userData');
 const ACCOUNTS_FILE = getSafePath(userDataPath, 'accounts.json');
 
-// 初始化版本管理器
-function initVersionManager() {
-  versionManager = new VersionManager();
-  
-  // 启动时检查版本和维护模式
-  setTimeout(async () => {
-    try {
-      console.log('启动时版本检查...');
-      const updateInfo = await versionManager.checkForUpdates();
-      
-      console.log('版本检查完成:', updateInfo);
-      
-      // 只有真正需要更新时才发送通知到渲染进程
-      if (updateInfo.hasUpdate && mainWindow && !mainWindow.isDestroyed()) {
-        console.log('📢 发送版本更新通知到渲染进程');
-        mainWindow.webContents.send('version-update-available', {
-          currentVersion: updateInfo.currentVersion,
-          latestVersion: updateInfo.latestVersion,
-          hasUpdate: updateInfo.hasUpdate,
-          forceUpdate: updateInfo.forceUpdate,
-          isSupported: updateInfo.isSupported,
-          updateMessage: updateInfo.updateMessage,
-          downloadUrl: versionManager.getDownloadUrl()
-        });
-      } else {
-        console.log(' 无需更新或版本检测异常（已安全处理）');
-      }
-    } catch (error) {
-      // 检查是否是维护模式
-      if (error.isMaintenance) {
-        console.warn('🔧 检测到服务器维护模式');
-        handleMaintenanceMode(error.maintenanceInfo);
-      } else {
-        // API 无法访问 - 不允许使用软件
-        console.error('无法连接到服务器，软件无法使用');
-        console.error('错误详情:', error);
-        isApiUnavailable = true;
-        
-        // 关闭开发者工具
-        if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.isDevToolsOpened()) {
-          mainWindow.webContents.closeDevTools();
-        }
-        
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('api-unavailable', {
-            error: error.message,
-            message: '无法连接到服务器，请检查网络连接。如果开启了代理/VPN，请关闭后重试。'
-          });
-        }
-      }
-    }
-  }, 3000); // 延迟3秒检查，避免影响启动速度
-  
-  // 启动自动定时检测（3分钟检查一次）
-  versionManager.startAutoCheck(
-    // 发现更新时的回调函数
-    (updateInfo) => {
-      // 只有真正需要更新时才发送通知
-      if (updateInfo.hasUpdate && mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('version-update-available', {
-          currentVersion: updateInfo.currentVersion,
-          latestVersion: updateInfo.latestVersion,
-          hasUpdate: updateInfo.hasUpdate,
-          forceUpdate: updateInfo.forceUpdate,
-          isSupported: updateInfo.isSupported,
-          updateMessage: updateInfo.updateMessage,
-          downloadUrl: versionManager.getDownloadUrl()
-        });
-      }
-    },
-    // 维护模式回调函数
-    (maintenanceInfo) => {
-      console.warn('🔧 检测到服务器维护模式');
-      handleMaintenanceMode(maintenanceInfo);
-    },
-    // 维护模式结束回调函数
-    () => {
-      console.log('维护模式已结束');
-      isMaintenanceModeActive = false;
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('maintenance-mode-ended');
-      }
-    },
-    // API 无法访问回调函数
-    (errorInfo) => {
-      console.error('运行时检测到 API 无法访问');
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('api-unavailable', errorInfo);
-      }
-    }
-  );
-}
-
-// 处理维护模式
-function handleMaintenanceMode(maintenanceInfo) {
-  console.log('🔧 进入维护模式:', maintenanceInfo.message);
-  
-  // 设置维护模式状态
-  isMaintenanceModeActive = true;
-  
-  // 关闭开发者工具
-  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.isDevToolsOpened()) {
-    mainWindow.webContents.closeDevTools();
-  }
-  
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    // 发送维护模式通知到渲染进程
-    mainWindow.webContents.send('maintenance-mode-active', {
-      enabled: maintenanceInfo.enabled,
-      message: maintenanceInfo.message || '服务器正在维护中，请稍后再试',
-      timestamp: new Date().toISOString()
-    });
-  }
-}
 
 function createWindow() {
   console.log('开始创建主窗口...');
@@ -269,8 +148,6 @@ function createWindow() {
   mainWindow.once('ready-to-show', () => {
     console.log('窗口准备就绪，开始显示');
     mainWindow.show();
-    // 初始化版本管理器
-    initVersionManager();
   });
 
   // 监听渲染进程崩溃
@@ -1320,34 +1197,6 @@ ipcMain.handle('copy-to-clipboard', async (event, text) => {
   }
 });
 
-// ==================== 版本管理 ====================
-
-// 手动检查版本更新
-ipcMain.handle('check-for-updates', async () => {
-  try {
-    if (!versionManager) {
-      versionManager = new VersionManager();
-    }
-    
-    const updateInfo = await versionManager.checkForUpdates();
-    return {
-      success: true,
-      currentVersion: updateInfo.currentVersion,
-      latestVersion: updateInfo.latestVersion,
-      hasUpdate: updateInfo.hasUpdate,
-      forceUpdate: updateInfo.forceUpdate,
-      isSupported: updateInfo.isSupported,
-      updateMessage: updateInfo.updateMessage,
-      downloadUrl: versionManager.getDownloadUrl()
-    };
-  } catch (error) {
-    console.error('检查版本更新失败:', error);
-    return {
-      success: false,
-      error: error.message
-    };
-  }
-});
 
 // 打开下载链接
 ipcMain.handle('open-download-url', async (event, downloadUrl) => {
@@ -1862,90 +1711,6 @@ ipcMain.handle('auto-fill-payment', async (event, { paymentLink, card, billing }
   }
 });
 
-// 获取当前版本信息
-ipcMain.handle('get-version-info', async () => {
-  try {
-    if (!versionManager) {
-      versionManager = new VersionManager();
-    }
-    
-    return {
-      success: true,
-      currentVersion: versionManager.getCurrentVersion(),
-      platformName: versionManager.getPlatformName()
-    };
-  } catch (error) {
-    console.error('获取版本信息失败:', error);
-    return {
-      success: false,
-      error: error.message
-    };
-  }
-});
-
-// 获取版本检测状态
-ipcMain.handle('get-version-check-status', async () => {
-  try {
-    if (!versionManager) {
-      return {
-        success: false,
-        error: '版本管理器未初始化'
-      };
-    }
-    
-    const status = versionManager.getStatus();
-    return {
-      success: true,
-      ...status
-    };
-  } catch (error) {
-    console.error('获取版本检测状态失败:', error);
-    return {
-      success: false,
-      error: error.message
-    };
-  }
-});
-
-// 设置版本检测间隔
-ipcMain.handle('set-version-check-interval', async (event, interval) => {
-  try {
-    if (!versionManager) {
-      return {
-        success: false,
-        error: '版本管理器未初始化'
-      };
-    }
-    
-    // 验证间隔值（最小1分钟，最大24小时）
-    const minInterval = 60 * 1000; // 1分钟
-    const maxInterval = 24 * 60 * 60 * 1000; // 24小时
-    
-    if (interval < minInterval || interval > maxInterval) {
-      return {
-        success: false,
-        error: `检测间隔必须在1分钟到24小时之间`
-      };
-    }
-    
-    versionManager.setCheckInterval(interval);
-    
-    return {
-      success: true,
-      message: `检测间隔已设置为${interval / 1000 / 60}分钟`
-    };
-  } catch (error) {
-    console.error('设置版本检测间隔失败:', error);
-    return {
-      success: false,
-      error: error.message
-    };
-  }
-});
-
-// 注意：维护模式检查已由 versionManager 统一管理
-// 删除了重复的 check-maintenance-mode 和 exit-maintenance-mode IPC 处理器
-// 所有维护模式状态变化都通过 versionManager 的回调函数通知渲染进程
 
 // ==================== 批量注册 ====================
 

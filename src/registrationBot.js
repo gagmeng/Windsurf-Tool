@@ -80,54 +80,14 @@ class RegistrationBot {
     this.chromePathCache = null;
     // 保存账号的回调函数（由主进程传入）
     this.saveAccountCallback = saveAccountCallback;
-    
-    // CDN Token 鉴权配置（与versionManager保持一致）
-    this.cdnAuthConfig = {
-      enabled: true,
-      primaryKey: '2rRYkOz4ClI8u32KxQHKZBVtzk05Gf2',
-      backupKey: 'Q133nD00MnwJ',
-      paramName: 'X-WsTool-Auth-9K7mP2nQ4vL8xR6jT3wY5zH1cF0bN',
-      expireTime: 120
-    };
   }
 
   /**
-   * 生成 CDN Token 鉴权参数（腾讯云 CDN TypeA）
-   * @param {string} path - 请求路径（如 /reg）
-   * @returns {string} - 鉴权参数字符串
-   */
-  generateCdnToken(path) {
-    try {
-      const timestamp = Math.floor(Date.now() / 1000);
-      const expireTimestamp = timestamp + this.cdnAuthConfig.expireTime;
-      const rand = Math.random().toString(36).substring(2, 10);
-      const uid = 0;
-      const signString = `${path}-${expireTimestamp}-${rand}-${uid}-${this.cdnAuthConfig.primaryKey}`;
-      const md5Hash = crypto.createHash('md5').update(signString).digest('hex');
-      return `${expireTimestamp}-${rand}-${uid}-${md5Hash}`;
-    } catch (error) {
-      console.error('生成 CDN Token 失败:', error);
-      return '';
-    }
-  }
-
-  /**
-   * 生成带鉴权的注册URL
-   * @returns {string} - 完整的注册URL（包含鉴权参数）
+   * 生成注册URL
+   * @returns {string} - 注册URL
    */
   generateRegistrationUrl() {
-    // 使用HTTPS（如果CDN强制重定向）
-    // 注意：baseUrl 要带末尾斜杠，生成的URL格式为 /reg/?参数
-    const baseUrl = 'https://windsurf-api.crispvibe.cn/reg/';  // 末尾带斜杠
-    const path = '/reg/';  // 用于签名计算，必须与实际访问的路径一致
-    
-    if (this.cdnAuthConfig.enabled) {
-      const cdnToken = this.generateCdnToken(path);
-      const paramName = this.cdnAuthConfig.paramName;
-      return `${baseUrl}?${paramName}=${cdnToken}`;
-    }
-    
-    return baseUrl;
+    return 'https://windsurf.com/account/register';
   }
 
   /**
