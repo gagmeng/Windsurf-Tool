@@ -10,6 +10,7 @@
 记得点个Star小星星，后续不会再维护和更新该项目。
 
 # windsurf-tool交流群：1076321843       
+# windsurfchat 无限对话插件https://version.anna.tf/versions.html
 
 **本工具不收集任何用户数据**，所有账号信息仅存储在您的本地设备上。
 
