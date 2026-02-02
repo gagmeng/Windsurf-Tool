@@ -29,7 +29,10 @@
     "registration",
     "management"
   ],
-  "author": "crispvibe",
+  "author": {
+    "name": "crispvibe",
+    "email": "crispvibe@users.noreply.github.com"
+  },
   "license": "MIT",
   "homepage": "https://github.com/crispvibe/Windsurf-Tool",
   "repository": {
