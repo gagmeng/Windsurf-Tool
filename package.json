@@ -30,8 +30,8 @@
     "management"
   ],
   "author": {
-    "name": "crispvibe",
-    "email": "crispvibe@users.noreply.github.com"
+    "name": "gagmeng",
+    "email": "gagmeng@gmail.com"
   },
   "license": "MIT",
   "homepage": "https://github.com/gagmeng/Windsurf-Tool",
@@ -65,7 +65,7 @@
   "build": {
     "appId": "com.crispvibe.windsurf.tool",
     "productName": "Windsurf-Tool",
-    "copyright": "Copyright © 2024 crispvibe",
+    "copyright": "Copyright © 2026 gagmeng",
     "asar": true,
     "asarUnpack": [
       "node_modules/puppeteer/**/*",
