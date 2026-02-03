@@ -62,6 +62,7 @@ let currentRegistrationBot = null;
 let isForceUpdateActive = false;
 let isMaintenanceModeActive = false;
 let isApiUnavailable = false;
+let versionCheckInterval = null;
 
 // 应用名称 - 必须设置为 'Windsurf' 以使用相同的 Keychain 密钥
 app.setName('Windsurf');
@@ -362,13 +363,10 @@ app.whenReady().then(async () => {
           }
         },
         { type: 'separator' },
-        {
-          label: 'QQ群',
-          click: () => shell.openExternal('https://qm.qq.com/q/1W3jvnDoak')
-        },
+
         {
           label: 'GitHub',
-          click: () => shell.openExternal('https://github.com/crispvibe/Windsurf-Tool')
+          click: () => shell.openExternal('https://github.com/gagmeng/Windsurf-Tool')
         }
       ]
     }
@@ -1211,7 +1209,7 @@ ipcMain.handle('open-download-url', async (event, downloadUrl) => {
       return { success: true };
     } else {
       // 如果没有下载链接，打开GitHub发布页面
-      await shell.openExternal('https://github.com/crispvibe/Windsurf-Tool/releases/latest');
+      await shell.openExternal('https://github.com/gagmeng/Windsurf-Tool/releases/latest');
       return { success: true };
     }
   } catch (error) {

@@ -6,6 +6,11 @@ window.ipcRenderer = require('electron').ipcRenderer;
 let lastVersionCheckTime = 0;
 const versionCheckCooldown = 30000; // 30秒冷却
 
+// 应用状态标志
+let isForceUpdateActive = false;
+let isMaintenanceModeActive = false;
+let isQuitting = false;
+
 // 加载 lucide 图标库
 try {
   const lucideModule = require('lucide');
@@ -1058,14 +1063,14 @@ async function openDownloadUrl() {
             <i data-lucide="github" style="width: 24px; height: 24px;"></i>
             <div style="text-align: left;">
               <div>GitHub Releases</div>
-              <div style="font-size: 12px; opacity: 0.8; font-weight: normal;">https://github.com/crispvibe/Windsurf-Tool/releases</div>
+              <div style="font-size: 12px; opacity: 0.8; font-weight: normal;">https://github.com/gagmeng/Windsurf-Tool/releases</div>
             </div>
           </button>
           <button onclick="openQQGroup()" style="background: linear-gradient(180deg, #12b7f5 0%, #0099e5 100%); color: white; border: none; padding: 16px; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 12px; transition: all 0.2s; pointer-events: auto;">
             <i data-lucide="message-circle" style="width: 24px; height: 24px;"></i>
             <div style="text-align: left;">
               <div>加入 QQ 群获取</div>
-              <div style="font-size: 12px; opacity: 0.8; font-weight: normal;">群号：469028100</div>
+              <div style="font-size: 12px; opacity: 0.8; font-weight: normal;">Email: gagmeng@gmail.com</div>
             </div>
           </button>
         </div>
@@ -1092,7 +1097,7 @@ async function openDownloadUrl() {
 
 // 打开 GitHub Releases
 function openGithubReleases() {
-  shell.openExternal('https://github.com/crispvibe/Windsurf-Tool/releases');
+  shell.openExternal('https://github.com/gagmeng/Windsurf-Tool/releases');
   closeDownloadChoice();
 }
 
