@@ -2,6 +2,10 @@
 // 将 ipcRenderer 挂载到 window 对象，供全局使用
 window.ipcRenderer = require('electron').ipcRenderer;
 
+// 版本检测冷却时间控制
+let lastVersionCheckTime = 0;
+const versionCheckCooldown = 30000; // 30秒冷却
+
 // 加载 lucide 图标库
 try {
   const lucideModule = require('lucide');
